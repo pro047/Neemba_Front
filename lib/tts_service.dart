@@ -14,6 +14,7 @@ class TextToSpeechService {
   bool get isClosed => _closed || _sentenceStream.isClosed;
 
   Future<void> init() async {
+    await tts.setEngine('com.google.android.tts');
     await tts.setLanguage('en-US');
     await tts.setSpeechRate(0.45);
     await tts.setVolume(1.0);
