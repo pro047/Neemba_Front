@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mvp/provider/input_state_provider.dart';
+import 'package:mvp/provider/mic_client_provider.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
 import 'package:mvp/provider/result_provider.dart';
@@ -116,6 +118,10 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
                     ? null
                     : () async {
                         await ref.read(restClientProvider).startSession(ref);
+                        ref.read(inputStateProvider.notifier).state =
+                            inputState.rtmp;
+
+                        print(ref.read(inputStateProvider.notifier).state);
 
                         final value = ref
                             .read(startSessionResultProvider)
@@ -201,34 +207,12 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: asyncMicResult.isLoading
-                    ? null
-                    : () async {
-                        await ref.read(restClientProvider).startSession(ref);
+                onPressed: () async {
+                  await ref.read(micClientProvider).startMic(ref);
+                  ref.read(inputStateProvider.notifier).state = inputState.mic;
 
-                        final value = ref
-                            .read(startSessionResultProvider)
-                            .value;
-                        if (value == null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('create session failed'),
-                            ),
-                          );
-                          return;
-                        }
-
-                        await ref
-                            .read(wsClientProvider)
-                            .connect(
-                              sessionId: value.sessionId,
-                              webSocketUrl: value.webSocketUrl,
-                              onText: onText,
-                            );
-
-                        texts = [];
-                        setState(() {});
-                      },
+                  print(ref.read(inputStateProvider.notifier).state);
+                },
                 child: const Text('Start'),
               ),
             ),

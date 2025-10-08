@@ -20,7 +20,7 @@ class WsClient {
         print('event : $event');
         onText(event);
       },
-      onDone: () => {print('ws closed')},
+      onDone: () => print('ws closed'),
       onError: (e) => print('ws error $e'),
     );
   }
