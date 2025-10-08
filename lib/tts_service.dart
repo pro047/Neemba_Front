@@ -4,17 +4,15 @@ import 'package:flutter_tts/flutter_tts.dart';
 
 class TextToSpeechService {
   final FlutterTts tts = FlutterTts();
-  final StreamController<String> _sentenceStream = StreamController();
+  StreamController<String>? _controller;
   bool _closed = false;
   int? _currentText;
   bool _isRunning = false;
 
   int? get currentSpeakingIndex => _currentText;
-  Stream<String> get stream => _sentenceStream.stream;
-  bool get isClosed => _closed || _sentenceStream.isClosed;
 
   Future<void> init() async {
-    await tts.setEngine('com.google.android.tts');
+    // await tts.setEngine('com.google.android.tts');
     await tts.setLanguage('en-US');
     await tts.setSpeechRate(0.45);
     await tts.setVolume(1.0);
@@ -25,26 +23,31 @@ class TextToSpeechService {
   }
 
   void enqueue(String sentence) {
-    if (isClosed) {
-      print('tts enqueue ignored closed : $sentence');
-      return;
-    }
-    _sentenceStream.isClosed;
     final text = sentence.trim();
     if (text.isEmpty) return;
-    _sentenceStream.add(text);
-    if (!_isRunning) _run();
+
+    _ensureController();
+
+    if (!_controller!.isClosed) {
+      _controller!.add(text);
+    }
+
+    if (!_isRunning) {
+      _isRunning = true;
+    }
   }
 
-  void _run() {
-    _isRunning = true;
-    _sentenceStream.stream
-        .asyncMap((s) => _speak(s))
-        .listen(
-          (_) {},
-          onDone: () => _isRunning = false,
-          onError: (e, st) => _isRunning = false,
-        );
+  void _ensureController() {
+    if (_controller == null || _controller!.isClosed) {
+      _controller = StreamController<String>.broadcast();
+
+      _controller!.stream
+          .asyncMap((s) => _speak(s))
+          .listen(
+            (_) {},
+            onError: (e, st) => {print('tts error :  $e'), _isRunning = false},
+          );
+    }
   }
 
   Future<void> speakAt(int index, String text) async {
@@ -72,7 +75,8 @@ class TextToSpeechService {
   Future<void> dispose() async {
     if (_closed) return;
     _closed = true;
+    _isRunning = false;
     await tts.stop();
-    await _sentenceStream.close();
+    await _controller!.close();
   }
 }

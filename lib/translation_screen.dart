@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mvp/provider/mic_result_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
 import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
 import 'package:mvp/tts_service.dart';
-import 'package:mvp/validate_url.dart';
 
 class TranslationScreen extends ConsumerStatefulWidget {
   const TranslationScreen({super.key});
@@ -41,8 +41,8 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
 
   void onText(String text) {
     print(text);
-    textToSpeechService.enqueue(text);
     texts.add(text);
+    textToSpeechService.enqueue(text);
     setState(() {});
   }
 
@@ -51,21 +51,28 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
     setState(() {});
   }
 
-  void _onChanged(String value) {
-    errorMessage.value = validateRtmpUrl(value);
-  }
-
+  //
   @override
   Widget build(BuildContext context) {
-    final asyncResult = ref.watch(startSessionResultProvider);
-    final isSuccessed = ref.watch(startSessionSuccessProvider) ?? false;
+    final asyncRtmpResult = ref.watch(startSessionResultProvider);
+    final asyncMicResult = ref.watch(micResultProvider);
+    final isRtmpSuccessed = ref.watch(startSessionSuccessProvider) ?? false;
+    final isMicSuccessed = ref.watch(micResultSuccessProvider) ?? false;
     final current = textToSpeechService.currentSpeakingIndex;
 
-    Widget body() {
+    Widget RtmpView() {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            SizedBox(
+              width: double.infinity,
+              child: Text(
+                'URL',
+                textAlign: TextAlign.left,
+                style: TextStyle(fontSize: 18),
+              ),
+            ),
             Row(
               children: [
                 Expanded(
@@ -105,7 +112,96 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: asyncResult.isLoading
+                onPressed: asyncRtmpResult.isLoading
+                    ? null
+                    : () async {
+                        await ref.read(restClientProvider).startSession(ref);
+
+                        final value = ref
+                            .read(startSessionResultProvider)
+                            .value;
+                        if (value == null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('create session failed'),
+                            ),
+                          );
+                          return;
+                        }
+
+                        await ref
+                            .read(wsClientProvider)
+                            .connect(
+                              sessionId: value.sessionId,
+                              webSocketUrl: value.webSocketUrl,
+                              onText: onText,
+                            );
+
+                        texts = [];
+                        setState(() {});
+                      },
+                child: const Text('Start'),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      );
+    }
+
+    Widget MicView() {
+      return Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            SizedBox(
+              width: double.infinity,
+              child: Text(
+                'MIC',
+                textAlign: TextAlign.left,
+                style: TextStyle(fontSize: 18),
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: sourceLangCode,
+                    items: const [
+                      DropdownMenuItem(value: 'ko-KR', child: Text('Korean')),
+                    ],
+                    onChanged: (v) => setState(() {
+                      sourceLangCode = v!;
+                    }),
+                    decoration: const InputDecoration(
+                      labelText: 'Source Language',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: targetLangCode,
+                    items: const [
+                      DropdownMenuItem(value: 'en-US', child: Text('English')),
+                    ],
+                    onChanged: (v) => setState(() {
+                      targetLangCode = v!;
+                    }),
+                    decoration: const InputDecoration(
+                      labelText: 'Target Language',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 12),
+
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: asyncMicResult.isLoading
                     ? null
                     : () async {
                         await ref.read(restClientProvider).startSession(ref);
@@ -226,30 +322,73 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
 
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
-      child: Scaffold(
-        appBar: AppBar(title: const Text('Neemba')),
-        body: asyncResult.when(
-          data: (data) {
-            print('data $data');
-            print(
-              'is Transrating : ${ref.read(startSessionSuccessProvider.notifier).state}',
-            );
-            return isSuccessed ? SuccessView() : body();
-          },
-          error: (err, st) {
-            print('$err / $st');
-            return Center(child: Text('Err $err'));
-          },
-          loading: () => const Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(backgroundColor: Colors.white),
-                SizedBox(height: 12),
-                Text('Starting...'),
-              ],
+      child: DefaultTabController(
+        length: 2,
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('Neemba'),
+            bottom: PreferredSize(
+              preferredSize: const Size.fromHeight(40),
+              child: TabBar(
+                isScrollable: false,
+                tabs: [
+                  Tab(icon: Icon(Icons.abc), text: "URL"),
+                  Tab(icon: Icon(Icons.mic), text: "MIC"),
+                ],
+              ),
             ),
+          ),
+          body: TabBarView(
+            children: [
+              asyncRtmpResult.when(
+                data: (data) {
+                  print('data $data');
+                  print(
+                    'is Transrating : ${ref.read(startSessionSuccessProvider.notifier).state}',
+                  );
+                  return isRtmpSuccessed ? SuccessView() : RtmpView();
+                },
+                error: (err, st) {
+                  print('$err / $st');
+                  return Center(child: Text('Err $err'));
+                },
+                loading: () => const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(backgroundColor: Colors.white),
+                      SizedBox(height: 12),
+                      Text('Starting...'),
+                    ],
+                  ),
+                ),
+              ),
+              asyncMicResult.when(
+                data: (data) {
+                  print('data $data');
+                  print(
+                    'is Transrating : ${ref.read(startSessionSuccessProvider.notifier).state}',
+                  );
+                  return isMicSuccessed ? SuccessView() : MicView();
+                },
+                error: (err, st) {
+                  print('$err / $st');
+                  return Center(child: Text('Err $err'));
+                },
+                loading: () => const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(backgroundColor: Colors.white),
+                      SizedBox(height: 12),
+                      Text('Starting...'),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

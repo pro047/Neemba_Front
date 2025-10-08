@@ -7,6 +7,6 @@ class ApiConfig {
 
   factory ApiConfig.local() {
     final host = dotenv.get('HOST');
-    return ApiConfig._('https://$host');
+    return ApiConfig._('http://$host');
   }
 }

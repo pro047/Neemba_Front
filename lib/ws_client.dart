@@ -10,9 +10,9 @@ class WsClient {
     required String webSocketUrl,
     required void Function(String) onText,
   }) async {
-    final url = Uri.parse(
-      webSocketUrl.replaceAll('#', ''),
-    ).replace(scheme: 'wss');
+    final url = Uri.parse(webSocketUrl);
+    //   webSocketUrl.replaceAll('#', ''),
+    // ).replace(scheme: 'wss');
     print('webSocket url : $url');
     _channel = IOWebSocketChannel.connect(url);
     _channel!.stream.listen(
