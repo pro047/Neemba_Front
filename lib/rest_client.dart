@@ -47,7 +47,6 @@ class RestClient {
       });
       print('result $result');
       ref.read(startSessionResultProvider.notifier).state = result;
-      ref.read(startSessionSuccessProvider.notifier).state = true;
     } catch (err) {
       print('start err : $err');
       throw Exception('start error');
@@ -60,10 +59,6 @@ class RestClient {
       url,
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'sessionId': sessionId}),
-    );
-    ref.read(startSessionSuccessProvider.notifier).state = false;
-    print(
-      '$url stop sessoins / state : ${ref.read(startSessionSuccessProvider.notifier).state}',
     );
   }
 }

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mvp/translation_screen.dart';
+import 'package:mvp/mode_select_screen.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 Future main() async {
@@ -16,7 +16,7 @@ class NeembaMiniApp extends StatelessWidget {
     return MaterialApp(
       title: 'Neemba',
       theme: ThemeData.dark(),
-      home: const TranslationScreen(),
+      home: const ModeSelectScreen(),
     );
   }
 }

@@ -1,44 +1,54 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/mic_client_provider.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
-import 'package:mvp/provider/rest_client_provider.dart';
-import 'package:mvp/provider/result_provider.dart';
+import 'package:mvp/provider/screen_change_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
 import 'package:mvp/tts_service.dart';
 
-class TranslationScreen extends ConsumerStatefulWidget {
-  const TranslationScreen({super.key});
+class MicTranslationTab extends ConsumerStatefulWidget {
+  final TextToSpeechService service;
+  final AudioCaptureService audioCapture;
+  const MicTranslationTab({
+    super.key,
+    required this.service,
+    required this.audioCapture,
+  });
 
   @override
   ConsumerState<ConsumerStatefulWidget> createState() =>
-      _TranslationScreenState();
+      _MicTranslationTabState();
 }
 
-class _TranslationScreenState extends ConsumerState<TranslationScreen> {
-  final ValueNotifier<String?> errorMessage = ValueNotifier<String?>(null);
+class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   String sourceLangCode = 'ko-KR', targetLangCode = 'en-US';
   late final TextToSpeechService textToSpeechService;
-
+  late final AudioCaptureService audioCapture;
   List<String> texts = <String>[];
 
   @override
   void initState() {
+    textToSpeechService = widget.service;
+    audioCapture = widget.audioCapture;
+    _initAudioCaputure();
     super.initState();
-    textToSpeechService = TextToSpeechService();
-    _initTts();
   }
 
   @override
   void dispose() {
-    errorMessage.dispose();
     textToSpeechService.dispose();
+    _disposeCapture();
     super.dispose();
   }
 
-  _initTts() async {
-    await textToSpeechService.init();
+  void _initAudioCaputure() async {
+    await audioCapture.initAudioCapture();
+  }
+
+  void _disposeCapture() async {
+    await audioCapture.stopCapture();
   }
 
   void onText(String text) {
@@ -53,109 +63,14 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
     setState(() {});
   }
 
-  //
   @override
   Widget build(BuildContext context) {
-    final asyncRtmpResult = ref.watch(startSessionResultProvider);
+    final screenState = ref.watch(screenFlowProvider);
     final asyncMicResult = ref.watch(micResultProvider);
-    final isRtmpSuccessed = ref.watch(startSessionSuccessProvider) ?? false;
-    final isMicSuccessed = ref.watch(micResultSuccessProvider) ?? false;
     final current = textToSpeechService.currentSpeakingIndex;
 
-    Widget RtmpView() {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            SizedBox(
-              width: double.infinity,
-              child: Text(
-                'URL',
-                textAlign: TextAlign.left,
-                style: TextStyle(fontSize: 18),
-              ),
-            ),
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    value: sourceLangCode,
-                    items: const [
-                      DropdownMenuItem(value: 'ko-KR', child: Text('Korean')),
-                    ],
-                    onChanged: (v) => setState(() {
-                      sourceLangCode = v!;
-                    }),
-                    decoration: const InputDecoration(
-                      labelText: 'Source Language',
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    value: targetLangCode,
-                    items: const [
-                      DropdownMenuItem(value: 'en-US', child: Text('English')),
-                    ],
-                    onChanged: (v) => setState(() {
-                      targetLangCode = v!;
-                    }),
-                    decoration: const InputDecoration(
-                      labelText: 'Target Language',
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: asyncRtmpResult.isLoading
-                    ? null
-                    : () async {
-                        await ref.read(restClientProvider).startSession(ref);
-                        ref.read(inputStateProvider.notifier).state =
-                            inputState.rtmp;
-
-                        print(ref.read(inputStateProvider.notifier).state);
-
-                        final value = ref
-                            .read(startSessionResultProvider)
-                            .value;
-                        if (value == null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('create session failed'),
-                            ),
-                          );
-                          return;
-                        }
-
-                        await ref
-                            .read(wsClientProvider)
-                            .connect(
-                              sessionId: value.sessionId,
-                              webSocketUrl: value.webSocketUrl,
-                              onText: onText,
-                            );
-
-                        texts = [];
-                        setState(() {});
-                      },
-                child: const Text('Start'),
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-        ),
-      );
-    }
-
-    Widget MicView() {
+    Widget WaitingView() {
+      print(ref.read(inputStateProvider.notifier).state);
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -207,12 +122,70 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: () async {
-                  await ref.read(micClientProvider).startMic(ref);
-                  ref.read(inputStateProvider.notifier).state = inputState.mic;
+                onPressed: asyncMicResult.isLoading
+                    ? null
+                    : () async {
+                        await audioCapture.startCapture();
 
-                  print(ref.read(inputStateProvider.notifier).state);
-                },
+                        ref.read(inputStateProvider.notifier).state =
+                            inputState.mic;
+
+                        await ref
+                            .read(micClientProvider)
+                            .startMic(ref, audioCapture);
+
+                        ref.read(screenFlowProvider.notifier).start();
+
+                        final value = ref.read(micResultProvider).value;
+                        if (value == null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('create session failed'),
+                            ),
+                          );
+                          return;
+                        }
+
+                        await ref
+                            .read(wsClientProvider)
+                            .connectWithRetry(
+                              sessionId: value.sessionId,
+                              webSocketUrl: value.webSocketUrl,
+                              onText: onText,
+                              maxRetries: 2,
+                              onReconnectAttempt: (attempt) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '연결 끊김. 재연결 시도 중... ($attempt/2)',
+                                    ),
+                                  ),
+                                );
+                              },
+                              onReconnected: () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('연결이 복구되었습니다.'),
+                                  ),
+                                );
+                              },
+                              onPermanentFailure: (error) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content:
+                                        Text('연결 복구 실패. 다시 시작해 주세요.'),
+                                  ),
+                                );
+                                ref.read(screenFlowProvider.notifier).reset();
+                                _disposeCapture();
+                              },
+                            );
+
+                        texts = [];
+                        setState(() {});
+
+                        print(ref.read(inputStateProvider.notifier).state);
+                      },
                 child: const Text('Start'),
               ),
             ),
@@ -248,15 +221,18 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () async {
-                  final value = ref.read(startSessionResultProvider).value;
+                  ref.read(screenFlowProvider.notifier).reset();
+
+                  final value = ref.read(micResultProvider).value;
                   if (value != null) {
                     await ref
-                        .read(restClientProvider)
+                        .read(micClientProvider)
                         .stopSession(ref, value.sessionId);
                   }
 
                   await ref.read(wsClientProvider).close();
                   textToSpeechService.dispose();
+                  _disposeCapture();
                 },
                 child: const Text('Stop'),
               ),
@@ -304,76 +280,28 @@ class _TranslationScreenState extends ConsumerState<TranslationScreen> {
       );
     }
 
-    return GestureDetector(
-      onTap: () => FocusScope.of(context).unfocus(),
-      child: DefaultTabController(
-        length: 2,
-        child: Scaffold(
-          appBar: AppBar(
-            title: const Text('Neemba'),
-            bottom: PreferredSize(
-              preferredSize: const Size.fromHeight(40),
-              child: TabBar(
-                isScrollable: false,
-                tabs: [
-                  Tab(icon: Icon(Icons.abc), text: "URL"),
-                  Tab(icon: Icon(Icons.mic), text: "MIC"),
-                ],
-              ),
-            ),
-          ),
-          body: TabBarView(
-            children: [
-              asyncRtmpResult.when(
-                data: (data) {
-                  print('data $data');
-                  print(
-                    'is Transrating : ${ref.read(startSessionSuccessProvider.notifier).state}',
-                  );
-                  return isRtmpSuccessed ? SuccessView() : RtmpView();
-                },
-                error: (err, st) {
-                  print('$err / $st');
-                  return Center(child: Text('Err $err'));
-                },
-                loading: () => const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(backgroundColor: Colors.white),
-                      SizedBox(height: 12),
-                      Text('Starting...'),
-                    ],
-                  ),
-                ),
-              ),
-              asyncMicResult.when(
-                data: (data) {
-                  print('data $data');
-                  print(
-                    'is Transrating : ${ref.read(startSessionSuccessProvider.notifier).state}',
-                  );
-                  return isMicSuccessed ? SuccessView() : MicView();
-                },
-                error: (err, st) {
-                  print('$err / $st');
-                  return Center(child: Text('Err $err'));
-                },
-                loading: () => const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(backgroundColor: Colors.white),
-                      SizedBox(height: 12),
-                      Text('Starting...'),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+    Widget ErrorView(String? msg) {
+      return Padding(
+        padding: EdgeInsetsGeometry.all(16),
+        child: Center(child: Text(msg ?? '')),
+      );
+    }
+
+    return screenState.when(
+      data: (data) {
+        switch (data.status) {
+          case ScreenState.waiting:
+            return WaitingView();
+          case ScreenState.succeed:
+            return SuccessView();
+          case ScreenState.failed:
+            return ErrorView(data.error);
+        }
+      },
+      error: (e, st) => ErrorView(e.toString()),
+      loading: () => const Center(
+        child: Column(
+          children: [CircularProgressIndicator(), Text('Start translating...')],
         ),
       ),
     );

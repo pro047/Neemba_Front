@@ -1,11 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
+import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
-import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/type.dart';
 
 class MicClient {
@@ -29,15 +28,21 @@ class MicClient {
     }
   }
 
-  Future<void> startMic(WidgetRef ref) async {
+  Future<void> startMic(WidgetRef ref, AudioCaptureService audiocapture) async {
     try {
-      // ref.read(micResultProvider.notifier).state = const AsyncLoading();
-      WebSocket socket = await WebSocket.connect('ws://localhost:3000/api/mic');
-
-      socket.add('ko-KR, en-US');
-      socket.listen((data) {
-        print('from server : $data');
+      ref.read(micResultProvider.notifier).state = const AsyncLoading();
+      final url = Uri.parse('${config.httpUrl}/api/mic/start');
+      final result = await AsyncValue.guard(() async {
+        final response = await http.post(
+          url,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'sourceLang': 'ko-KR', 'targetLang': 'en-Us'}),
+        );
+        final data = jsonDecode(response.body);
+        return StartSessionResponse.fromJson(data);
       });
+      print('result $result');
+      ref.read(micResultProvider.notifier).state = result;
     } catch (err) {
       print('start err : $err');
       throw Exception('start error');
@@ -50,10 +55,6 @@ class MicClient {
       url,
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'sessionId': sessionId}),
-    );
-    ref.read(startSessionSuccessProvider.notifier).state = false;
-    print(
-      '$url stop sessoins / state : ${ref.read(startSessionSuccessProvider.notifier).state}',
     );
   }
 }
