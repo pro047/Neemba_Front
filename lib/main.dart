@@ -4,7 +4,17 @@ import 'package:mvp/mode_select_screen.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 Future main() async {
-  await dotenv.load(fileName: '.env');
+  // Choose env file via --dart-define:
+  // - ENV=dev -> .env.dev
+  // - ENV=prod -> .env.prod
+  // - otherwise ENV_FILE or default .env
+  const env = String.fromEnvironment('ENV', defaultValue: '');
+  final envFile = switch (env) {
+    'dev' => '.env.dev',
+    'prod' => '.env.prod',
+    _ => const String.fromEnvironment('ENV_FILE', defaultValue: '.env'),
+  };
+  await dotenv.load(fileName: envFile);
   runApp(ProviderScope(child: NeembaMiniApp()));
 }
 

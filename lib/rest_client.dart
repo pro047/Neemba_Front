@@ -32,7 +32,7 @@ class RestClient {
       ref.read(startSessionResultProvider.notifier).state =
           const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/sessions/start');
-      print('rest url: $url');
+      print('Start button -> POST $url payload={"sourceLang":"ko-KR","targetLang":"en-US"}');
       final result = await AsyncValue.guard(() async {
         final response = await http.post(
           url,

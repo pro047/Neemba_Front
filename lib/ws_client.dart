@@ -4,23 +4,42 @@ import 'dart:async';
 import 'package:web_socket_channel/io.dart';
 
 class WsClient {
+  final Map<String, dynamic> _headers;
+  final String? _baseHttpUrl;
   IOWebSocketChannel? _channel;
   StreamSubscription? _subscription;
   bool _shouldReconnect = false;
   int _currentRetry = 0;
 
-  WsClient();
+  WsClient({Map<String, dynamic>? headers, String? baseHttpUrl})
+    : _headers = headers ?? const {},
+      _baseHttpUrl = baseHttpUrl;
+
+  Uri _buildUri(String webSocketUrl) {
+    final rawUri = Uri.parse(webSocketUrl);
+    if (_baseHttpUrl == null) return rawUri;
+
+    final base = Uri.parse(_baseHttpUrl);
+    final scheme = base.scheme == 'https' ? 'wss' : 'ws';
+    final port = base.hasPort
+        ? base.port
+        : scheme == 'wss'
+        ? 443
+        : 80;
+
+    // Keep path/query from backend response, override host/scheme/port to match REST base.
+    return rawUri.replace(scheme: scheme, host: base.host, port: port);
+  }
 
   Future<void> connect({
     required String sessionId,
     required String webSocketUrl,
     required void Function(String) onText,
   }) async {
-    final url = Uri.parse(webSocketUrl);
-    //   webSocketUrl.replaceAll('#', ''),
-    // ).replace(scheme: 'wss');
+    print('WS connect (single) session=$sessionId raw=$webSocketUrl');
+    final url = _buildUri(webSocketUrl);
     print('webSocket url : $url');
-    _channel = IOWebSocketChannel.connect(url);
+    _channel = IOWebSocketChannel.connect(url, headers: _headers);
     _channel!.stream.listen(
       (event) {
         print('event : $event');
@@ -52,17 +71,20 @@ class WsClient {
     void Function()? onReconnected,
     void Function(Object error)? onPermanentFailure,
   }) async {
+    print('WS connect (retry) session=$sessionId raw=$webSocketUrl');
     _shouldReconnect = true;
     _currentRetry = 0;
 
     Future<void> attemptConnect() async {
       if (!_shouldReconnect) return;
       try {
-        final url = Uri.parse(webSocketUrl);
-        print('webSocket url (session $sessionId, retry #$_currentRetry): $url');
+        final url = _buildUri(webSocketUrl);
+        print(
+          'webSocket url (session $sessionId, retry #$_currentRetry): $url',
+        );
         await _subscription?.cancel();
         await _channel?.sink.close();
-        _channel = IOWebSocketChannel.connect(url);
+        _channel = IOWebSocketChannel.connect(url, headers: _headers);
         _subscription = _channel!.stream.listen(
           (event) {
             print('event : $event');
@@ -140,12 +162,14 @@ class WsClient {
 
   bool _isPingEvent(dynamic event) {
     if (event is Map && event['type'] == 'ping') {
+      _channel?.sink.add(jsonEncode({'type': 'pong'}));
       return true;
     }
     if (event is String) {
       try {
         final decoded = jsonDecode(event);
         if (decoded is Map && decoded['type'] == 'ping') {
+          _channel?.sink.add(jsonEncode({'type': 'pong'}));
           return true;
         }
       } catch (_) {

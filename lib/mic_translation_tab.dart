@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/mic_client_provider.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
+import 'package:mvp/provider/node_ws_client_provider.dart';
 import 'package:mvp/provider/screen_change_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
 import 'package:mvp/tts_service.dart';
+import 'package:mvp/type.dart';
 
 class MicTranslationTab extends ConsumerStatefulWidget {
   final TextToSpeechService service;
@@ -27,12 +31,13 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   late final TextToSpeechService textToSpeechService;
   late final AudioCaptureService audioCapture;
   List<String> texts = <String>[];
+  bool _isStartingMic = false;
 
   @override
   void initState() {
     textToSpeechService = widget.service;
     audioCapture = widget.audioCapture;
-    _initAudioCaputure();
+    _initAudioCapture();
     super.initState();
   }
 
@@ -43,12 +48,55 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     super.dispose();
   }
 
-  void _initAudioCaputure() async {
+  void _initAudioCapture() async {
     await audioCapture.initAudioCapture();
   }
 
-  void _disposeCapture() async {
+  Future<void> _disposeCapture() async {
     await audioCapture.stopCapture();
+    await ref.read(nodeWsClientProvider).close();
+  }
+
+  Future<void> _cleanupMicSession(StartSessionResponse? session) async {
+    await ref.read(wsClientProvider).close();
+    await _disposeCapture();
+
+    if (session == null) {
+      return;
+    }
+
+    try {
+      await ref.read(micClientProvider).stopSession(ref, session.sessionId);
+    } catch (error) {
+      debugPrint('mic session cleanup failed: $error');
+    }
+  }
+
+  Future<void> _handleMicStartFailure(
+    StartSessionResponse? session, {
+    Object? error,
+    String? snackBarMessage,
+  }) async {
+    debugPrint('mic start failure: $error');
+    ref.read(screenFlowProvider.notifier).reset();
+    await _cleanupMicSession(session);
+
+    if (!mounted || snackBarMessage == null) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(snackBarMessage)));
+  }
+
+  void _setStartingMic(bool value) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isStartingMic = value;
+    });
   }
 
   void onText(String text) {
@@ -68,6 +116,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     final screenState = ref.watch(screenFlowProvider);
     final asyncMicResult = ref.watch(micResultProvider);
     final current = textToSpeechService.currentSpeakingIndex;
+    final isStarting = _isStartingMic || asyncMicResult.isLoading;
 
     Widget WaitingView() {
       print(ref.read(inputStateProvider.notifier).state);
@@ -122,73 +171,122 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: asyncMicResult.isLoading
+                onPressed: isStarting
                     ? null
                     : () async {
-                        await audioCapture.startCapture();
+                        StartSessionResponse? session;
 
-                        ref.read(inputStateProvider.notifier).state =
-                            inputState.mic;
+                        try {
+                          _setStartingMic(true);
+                          ref.read(inputStateProvider.notifier).state =
+                              inputState.mic;
 
-                        await ref
-                            .read(micClientProvider)
-                            .startMic(ref, audioCapture);
+                          await ref.read(micClientProvider).startMic(ref);
 
-                        ref.read(screenFlowProvider.notifier).start();
-
-                        final value = ref.read(micResultProvider).value;
-                        if (value == null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('create session failed'),
-                            ),
-                          );
-                          return;
-                        }
-
-                        await ref
-                            .read(wsClientProvider)
-                            .connectWithRetry(
-                              sessionId: value.sessionId,
-                              webSocketUrl: value.webSocketUrl,
-                              onText: onText,
-                              maxRetries: 2,
-                              onReconnectAttempt: (attempt) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '연결 끊김. 재연결 시도 중... ($attempt/2)',
-                                    ),
-                                  ),
-                                );
-                              },
-                              onReconnected: () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('연결이 복구되었습니다.'),
-                                  ),
-                                );
-                              },
-                              onPermanentFailure: (error) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content:
-                                        Text('연결 복구 실패. 다시 시작해 주세요.'),
-                                  ),
-                                );
-                                ref.read(screenFlowProvider.notifier).reset();
-                                _disposeCapture();
-                              },
+                          session = ref.read(micResultProvider).value;
+                          if (session == null) {
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('create session failed'),
+                              ),
                             );
+                            return;
+                          }
 
-                        texts = [];
-                        setState(() {});
+                          await ref
+                              .read(nodeWsClientProvider)
+                              .connect(sessionId: session.sessionId);
 
-                        print(ref.read(inputStateProvider.notifier).state);
+                          await audioCapture.startCapture(
+                            ref.read(nodeWsClientProvider).send,
+                          );
+
+                          await ref
+                              .read(wsClientProvider)
+                              .connectWithRetry(
+                                sessionId: session.sessionId,
+                                webSocketUrl: session.webSocketUrl,
+                                onText: onText,
+                                maxRetries: 2,
+                                onReconnectAttempt: (attempt) {
+                                  if (!mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        '연결 끊김. 재연결 시도 중... ($attempt/2)',
+                                      ),
+                                    ),
+                                  );
+                                },
+                                onReconnected: () {
+                                  if (!mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('연결이 복구되었습니다.'),
+                                    ),
+                                  );
+                                },
+                                onPermanentFailure: (error) {
+                                  unawaited(
+                                    _handleMicStartFailure(
+                                      session,
+                                      error: error,
+                                      snackBarMessage: '연결 복구 실패. 다시 시작해 주세요.',
+                                    ),
+                                  );
+                                },
+                              );
+
+                          ref.read(screenFlowProvider.notifier).start();
+
+                          texts = [];
+                          setState(() {
+                            _isStartingMic = false;
+                          });
+
+                          print(ref.read(inputStateProvider.notifier).state);
+                        } catch (error) {
+                          _setStartingMic(false);
+                          await _handleMicStartFailure(
+                            session,
+                            error: error,
+                            snackBarMessage: '마이크 시작에 실패했습니다. 다시 시도해 주세요.',
+                          );
+                        }
                       },
-                child: const Text('Start'),
+                child: isStarting
+                    ? const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          SizedBox(width: 12),
+                          Text('Starting...'),
+                        ],
+                      )
+                    : const Text('Start'),
               ),
             ),
+            if (isStarting) ...[
+              const SizedBox(height: 8),
+              const SizedBox(
+                width: double.infinity,
+                child: Text(
+                  'Real-time translation is starting...',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
           ],
         ),
