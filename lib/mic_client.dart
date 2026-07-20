@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
-import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
 import 'package:mvp/type.dart';
 
@@ -28,15 +27,25 @@ class MicClient {
     }
   }
 
-  Future<void> startMic(WidgetRef ref, AudioCaptureService audiocapture) async {
+  Future<void> startMic(
+    WidgetRef ref, {
+    required String sourceLang,
+    required String targetLang,
+  }) async {
     try {
       ref.read(micResultProvider.notifier).state = const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/mic/start');
+      print(
+        'Start button (mic) -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
+      );
       final result = await AsyncValue.guard(() async {
         final response = await http.post(
           url,
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'sourceLang': 'ko-KR', 'targetLang': 'en-Us'}),
+          body: jsonEncode({
+            'sourceLang': sourceLang,
+            'targetLang': targetLang,
+          }),
         );
         final data = jsonDecode(response.body);
         return StartSessionResponse.fromJson(data);

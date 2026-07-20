@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mvp/language_option.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
 import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/provider/screen_change_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
 import 'package:mvp/tts_service.dart';
+import 'package:mvp/ws_client.dart';
 
 class RtmpTranslationTab extends ConsumerStatefulWidget {
   final TextToSpeechService service;
@@ -17,11 +19,15 @@ class RtmpTranslationTab extends ConsumerStatefulWidget {
 }
 
 class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
-  String sourceLangCode = 'ko-KR', targetLangCode = 'en-US';
+  String sourceLangCode = 'ko-KR',
+      targetLangCode = englishTargetLanguage.translationCode;
   late final TextToSpeechService textToSpeechService;
   List<String> texts = <String>[];
   late final ScrollController _scrollController;
   bool _shouldAutoScroll = true;
+
+  TargetLanguageOption get _targetLanguage =>
+      targetLanguageOptionForCode(targetLangCode);
 
   @override
   void initState() {
@@ -34,20 +40,30 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   void dispose() {
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
-    textToSpeechService.dispose();
     super.dispose();
   }
 
   void onText(String text) {
     print(text);
     texts.add(text);
-    textToSpeechService.enqueue(text);
+    textToSpeechService.enqueue(text, language: _targetLanguage.ttsLocale);
     setState(() {});
     _scrollToBottomIfNeeded();
   }
 
   void handleTap(int index) async {
-    await textToSpeechService.speakAt(index, texts[index]);
+    final usedFallback = await textToSpeechService.speakAt(
+      index,
+      texts[index],
+      language: _targetLanguage.ttsLocale,
+    );
+    if (usedFallback && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${_targetLanguage.label} 음성을 지원하지 않아 영어 음성으로 재생합니다.'),
+        ),
+      );
+    }
     setState(() {});
   }
 
@@ -101,9 +117,10 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                     items: const [
                       DropdownMenuItem(value: 'ko-KR', child: Text('Korean')),
                     ],
-                    onChanged: (v) => setState(() {
-                      sourceLangCode = v!;
-                    }),
+                    onChanged:
+                        (v) => setState(() {
+                          sourceLangCode = v!;
+                        }),
                     decoration: const InputDecoration(
                       labelText: 'Source Language',
                     ),
@@ -113,12 +130,19 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     value: targetLangCode,
-                    items: const [
-                      DropdownMenuItem(value: 'en-US', child: Text('English')),
-                    ],
-                    onChanged: (v) => setState(() {
-                      targetLangCode = v!;
-                    }),
+                    items:
+                        targetLanguageOptions
+                            .map(
+                              (option) => DropdownMenuItem(
+                                value: option.translationCode,
+                                child: Text(option.label),
+                              ),
+                            )
+                            .toList(),
+                    onChanged:
+                        (v) => setState(() {
+                          targetLangCode = v!;
+                        }),
                     decoration: const InputDecoration(
                       labelText: 'Target Language',
                     ),
@@ -132,67 +156,86 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: asyncRtmpResult.isLoading
-                    ? null
-                    : () async {
-                        ref.read(inputStateProvider.notifier).state =
-                            inputState.rtmp;
+                onPressed:
+                    asyncRtmpResult.isLoading
+                        ? null
+                        : () async {
+                          ref.read(inputStateProvider.notifier).state =
+                              inputState.rtmp;
 
-                        await ref.read(restClientProvider).startSession(ref);
+                          await ref
+                              .read(restClientProvider)
+                              .startSession(
+                                ref,
+                                sourceLang: sourceLangCode,
+                                targetLang: targetLangCode,
+                              );
 
-                        ref.read(screenFlowProvider.notifier).start();
+                          ref.read(screenFlowProvider.notifier).start();
 
-                        print(ref.read(inputStateProvider.notifier).state);
+                          print(ref.read(inputStateProvider.notifier).state);
 
-                        final value = ref
-                            .read(startSessionResultProvider)
-                            .value;
-                        if (value == null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('create session failed'),
-                            ),
-                          );
-                          return;
-                        }
-
-                        await ref
-                            .read(wsClientProvider)
-                            .connectWithRetry(
-                              sessionId: value.sessionId,
-                              webSocketUrl: value.webSocketUrl,
-                              onText: onText,
-                              maxRetries: 2,
-                              onReconnectAttempt: (attempt) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '연결 끊김. 재연결 시도 중... ($attempt/2)',
-                                    ),
-                                  ),
-                                );
-                              },
-                              onReconnected: () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('연결이 복구되었습니다.'),
-                                  ),
-                                );
-                              },
-                              onPermanentFailure: (error) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content:
-                                        Text('연결 복구 실패. 다시 시작해 주세요.'),
-                                  ),
-                                );
-                                ref.read(screenFlowProvider.notifier).reset();
-                              },
+                          final value =
+                              ref.read(startSessionResultProvider).value;
+                          if (value == null) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('create session failed'),
+                              ),
                             );
+                            return;
+                          }
 
-                        texts = [];
-                        setState(() {});
-                      },
+                          await ref
+                              .read(wsClientProvider)
+                              .connectWithRetry(
+                                sessionId: value.sessionId,
+                                webSocketUrl: value.webSocketUrl,
+                                onText: onText,
+                                onReconnectAttempt: (attempt) {
+                                  // Guard against firing after the widget is
+                                  // disposed (e.g. right after Stop), which
+                                  // would make ScaffoldMessenger.of(context)
+                                  // unsafe. Matches mic tab pattern.
+                                  if (!mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)',
+                                      ),
+                                    ),
+                                  );
+                                },
+                                onReconnected: () {
+                                  if (!mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('연결이 복구되었습니다.'),
+                                    ),
+                                  );
+                                },
+                                onPermanentFailure: (error) {
+                                  // Same dispose-safety as the callbacks above:
+                                  // this can fire minutes after Stop.
+                                  if (!mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('연결 복구 실패. 다시 시작해 주세요.'),
+                                    ),
+                                  );
+                                  ref.read(screenFlowProvider.notifier).reset();
+                                },
+                              );
+
+                          texts = [];
+                          setState(() {});
+                        },
                 child: const Text('Start'),
               ),
             ),
@@ -218,7 +261,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                 Expanded(
                   child: InputDecorator(
                     decoration: InputDecoration(labelText: 'Target Language'),
-                    child: Text('English'),
+                    child: Text(_targetLanguage.label),
                   ),
                 ),
               ],
@@ -230,15 +273,18 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                 onPressed: () async {
                   ref.read(screenFlowProvider.notifier).reset();
 
+                  // Disable reconnect (_shouldReconnect=false) before the
+                  // server closes the result socket, so the server-initiated
+                  // close is treated as a manual shutdown instead of an
+                  // unexpected disconnect (no "reconnecting" toast).
+                  await ref.read(wsClientProvider).close();
+
                   final value = ref.read(startSessionResultProvider).value;
                   if (value != null) {
                     await ref
                         .read(restClientProvider)
                         .stopSession(ref, value.sessionId);
                   }
-
-                  await ref.read(wsClientProvider).close();
-                  textToSpeechService.dispose();
                 },
                 child: const Text('Stop'),
               ),
@@ -265,13 +311,14 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               child: ListView.builder(
                 controller: _scrollController,
                 itemCount: texts.length,
-                itemBuilder: (context, index) => ListTile(
-                  title: Text('‣ ${texts[index]}'),
-                  trailing: Icon(
-                    current == index ? Icons.stop : Icons.play_arrow,
-                  ),
-                  onTap: () => handleTap(index),
-                ),
+                itemBuilder:
+                    (context, index) => ListTile(
+                      title: Text('‣ ${texts[index]}'),
+                      trailing: Icon(
+                        current == index ? Icons.stop : Icons.play_arrow,
+                      ),
+                      onTap: () => handleTap(index),
+                    ),
               ),
             ),
           ],

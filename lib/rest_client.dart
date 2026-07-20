@@ -27,17 +27,26 @@ class RestClient {
     }
   }
 
-  Future<void> startSession(WidgetRef ref) async {
+  Future<void> startSession(
+    WidgetRef ref, {
+    required String sourceLang,
+    required String targetLang,
+  }) async {
     try {
       ref.read(startSessionResultProvider.notifier).state =
           const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/sessions/start');
-      print('rest url: $url');
+      print(
+        'Start button -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
+      );
       final result = await AsyncValue.guard(() async {
         final response = await http.post(
           url,
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'sourceLang': 'ko-KR', 'targetLang': 'en-US'}),
+          body: jsonEncode({
+            'sourceLang': sourceLang,
+            'targetLang': targetLang,
+          }),
         );
         print(
           'start session : status=${response.statusCode} contentType=${response.headers['content-type']}',

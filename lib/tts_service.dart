@@ -1,81 +1,244 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter_tts/flutter_tts.dart';
 
+class _SpeechRequest {
+  final String text;
+  final String language;
+
+  const _SpeechRequest({required this.text, required this.language});
+}
+
+class _TtsSpeakError implements Exception {
+  final String message;
+
+  const _TtsSpeakError(this.message);
+
+  @override
+  String toString() => message;
+}
+
 class TextToSpeechService {
   final FlutterTts _tts;
+  final Map<String, bool> _languageAvailability = <String, bool>{};
+  final ListQueue<_SpeechRequest> _queue = ListQueue<_SpeechRequest>();
+  Completer<String?>? _speechOutcome;
+  static const Map<String, List<String>> _languageFallbackCandidates = {
+    'sw-KE': <String>['sw-KE', 'sw', 'sw-TZ'],
+  };
 
   TextToSpeechService(this._tts) {
-    _tts.setLanguage('en-US');
-    _tts.setSpeechRate(0.45);
-    _tts.setVolume(1.0);
-    _tts.setPitch(1.0);
-    _tts.awaitSpeakCompletion(true);
+    _configure();
   }
 
-  StreamController<String>? _controller;
   bool _closed = false;
   int? _currentText;
   bool _isRunning = false;
 
   int? get currentSpeakingIndex => _currentText;
 
-  void enqueue(String sentence) {
+  Future<void> _configure() async {
+    await _tts.setLanguage('en-US');
+    await _tts.setSpeechRate(0.45);
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+    await _tts.awaitSpeakCompletion(true);
+    _tts.setStartHandler(() {
+      print('tts start');
+    });
+    _tts.setCompletionHandler(() {
+      print('tts complete');
+      _completeSpeechOutcome();
+    });
+    _tts.setErrorHandler((message) {
+      print('tts error: $message');
+      _completeSpeechOutcome(message);
+    });
+    _tts.setCancelHandler(() {
+      print('tts cancel');
+      _completeSpeechOutcome('cancelled');
+    });
+  }
+
+  void _completeSpeechOutcome([String? outcome]) {
+    final completer = _speechOutcome;
+    if (completer == null || completer.isCompleted) {
+      return;
+    }
+    completer.complete(outcome);
+  }
+
+  void enqueue(String sentence, {required String language}) {
     final text = sentence.trim();
     if (text.isEmpty) return;
-
-    _ensureController();
-
-    if (!_controller!.isClosed) {
-      _controller!.add(text);
+    if (_closed) {
+      print('tts enqueue ignored: service closed');
+      return;
     }
+
+    _queue.add(_SpeechRequest(text: text, language: language));
+    print('tts enqueue: language=$language text=$text');
 
     if (!_isRunning) {
-      _isRunning = true;
+      unawaited(_drainQueue());
     }
   }
 
-  void _ensureController() {
-    if (_controller == null || _controller!.isClosed) {
-      _controller = StreamController<String>.broadcast();
+  Future<void> _drainQueue() async {
+    if (_isRunning || _closed) {
+      return;
+    }
 
-      _controller!.stream
-          .asyncMap((s) => _speak(s))
-          .listen(
-            (_) {},
-            onError: (e, st) => {print('tts error :  $e'), _isRunning = false},
-          );
+    _isRunning = true;
+    try {
+      while (_queue.isNotEmpty && !_closed) {
+        final request = _queue.removeFirst();
+        await _speak(request);
+      }
+    } finally {
+      _isRunning = false;
     }
   }
 
-  Future<void> speakAt(int index, String text) async {
+  Future<bool> speakAt(
+    int index,
+    String text, {
+    required String language,
+    String fallbackLanguage = 'en-US',
+  }) async {
     if (_currentText == index) {
       await _tts.stop();
       _currentText = null;
-      return;
+      return false;
     }
 
     await _tts.stop();
     _currentText = index;
-    await _tts.speak(text);
+    final resolvedLanguage = await _resolveLanguage(
+      language,
+      fallbackLanguage: fallbackLanguage,
+    );
+    print('tts manual speak: requested=$language resolved=$resolvedLanguage');
+    await _speakWithFallback(
+      text,
+      requestedLanguage: resolvedLanguage,
+      fallbackLanguage: fallbackLanguage,
+    );
+    return resolvedLanguage != language;
   }
 
-  Future<void> _speak(String text) async {
+  Future<void> _speak(_SpeechRequest request) async {
+    final resolvedLanguage = await _resolveLanguage(
+      request.language,
+      fallbackLanguage: 'en-US',
+    );
     try {
-      await _tts.stop();
-      await _tts.speak(text);
-    } catch (_) {
+      print(
+        'tts autoplay speak: requested=${request.language} resolved=$resolvedLanguage text=${request.text}',
+      );
+      await _speakWithFallback(
+        request.text,
+        requestedLanguage: resolvedLanguage,
+        fallbackLanguage: 'en-US',
+      );
+    } catch (error) {
+      print('tts autoplay retry after error: $error');
       await Future.delayed(const Duration(milliseconds: 120));
-      await _tts.speak(text);
+      await _tts.speak(request.text);
     }
+  }
+
+  Future<void> _speakWithFallback(
+    String text, {
+    required String requestedLanguage,
+    required String fallbackLanguage,
+  }) async {
+    final attemptedLanguages = <String>{};
+    final candidates = <String>[
+      ...?_languageFallbackCandidates[requestedLanguage],
+      requestedLanguage,
+      fallbackLanguage,
+    ];
+
+    _TtsSpeakError? lastError;
+
+    for (final candidate in candidates) {
+      if (!attemptedLanguages.add(candidate)) {
+        continue;
+      }
+      try {
+        await _performSpeak(text, candidate);
+        if (candidate != requestedLanguage) {
+          print(
+            'tts fallback candidate success: requested=$requestedLanguage resolved=$candidate',
+          );
+        }
+        return;
+      } on _TtsSpeakError catch (error) {
+        _languageAvailability[candidate] = false;
+        lastError = error;
+        print(
+          'tts candidate failed: requested=$requestedLanguage candidate=$candidate error=$error',
+        );
+      }
+    }
+
+    if (lastError != null) {
+      throw lastError;
+    }
+  }
+
+  Future<void> _performSpeak(String text, String language) async {
+    await _tts.stop();
+    _speechOutcome = Completer<String?>();
+    try {
+      await _tts.setLanguage(language);
+      unawaited(_tts.speak(text));
+      final outcome = await _speechOutcome!.future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => 'timeout',
+      );
+      if (outcome != null && outcome != 'cancelled') {
+        throw _TtsSpeakError(outcome);
+      }
+    } finally {
+      _speechOutcome = null;
+    }
+  }
+
+  Future<String> _resolveLanguage(
+    String language, {
+    required String fallbackLanguage,
+  }) async {
+    if (await _isLanguageAvailable(language)) {
+      return language;
+    }
+    return fallbackLanguage;
+  }
+
+  Future<bool> isLanguageAvailable(String language) async {
+    return _isLanguageAvailable(language);
+  }
+
+  Future<bool> _isLanguageAvailable(String language) async {
+    final cached = _languageAvailability[language];
+    if (cached != null) {
+      return cached;
+    }
+
+    final availability = await _tts.isLanguageAvailable(language);
+    print('tts language availability: language=$language raw=$availability');
+    final isAvailable =
+        availability == true || availability == 1 || availability == 2;
+    _languageAvailability[language] = isAvailable;
+    return isAvailable;
   }
 
   Future<void> dispose() async {
     if (_closed) return;
-    if (_controller != null) {
-      await _controller!.close();
-    }
     _closed = true;
+    _queue.clear();
     _isRunning = false;
     await _tts.stop();
   }
