@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:mvp/mic_translation_tab.dart';
 import 'package:mvp/provider/audio_capture_provider.dart';
+import 'package:mvp/provider/mic_server_tts_provider.dart';
 import 'package:mvp/provider/tts_service_provider.dart';
 import 'package:mvp/rtmp_translation_tab.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +13,7 @@ class ModeSelectScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final service = ref.read(textToSpeechServiceProvider);
     final audioCapture = ref.read(audioCaptureProvider);
+    final micServerTts = ref.read(micServerTtsProvider);
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
       child: DefaultTabController(
@@ -33,7 +35,10 @@ class ModeSelectScreen extends ConsumerWidget {
           body: TabBarView(
             children: [
               RtmpTranslationTab(service: service),
-              MicTranslationTab(service: service, audioCapture: audioCapture),
+              MicTranslationTab(
+                audioCapture: audioCapture,
+                micTtsService: micServerTts,
+              ),
             ],
           ),
         ),

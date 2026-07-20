@@ -27,16 +27,25 @@ class MicClient {
     }
   }
 
-  Future<void> startMic(WidgetRef ref) async {
+  Future<void> startMic(
+    WidgetRef ref, {
+    required String sourceLang,
+    required String targetLang,
+  }) async {
     try {
       ref.read(micResultProvider.notifier).state = const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/mic/start');
-      print('Start button (mic) -> POST $url payload={"sourceLang":"ko-KR","targetLang":"en-Us"}');
+      print(
+        'Start button (mic) -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
+      );
       final result = await AsyncValue.guard(() async {
         final response = await http.post(
           url,
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'sourceLang': 'ko-KR', 'targetLang': 'en-Us'}),
+          body: jsonEncode({
+            'sourceLang': sourceLang,
+            'targetLang': targetLang,
+          }),
         );
         final data = jsonDecode(response.body);
         return StartSessionResponse.fromJson(data);
