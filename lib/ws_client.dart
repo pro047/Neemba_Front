@@ -3,6 +3,13 @@ import 'dart:async';
 
 import 'package:web_socket_channel/io.dart';
 
+/// §4-4-3: ws 재시도 예산. 서버(WebSocketHub)는 끊김 후 5분(300s) 동안
+/// pending 큐를 유지하며 재접속을 기다리는데, 기존 maxRetries 2(≈3초 포기)는
+/// 그 예산과 어긋나 큐 방류 기회를 버렸다(2026-07-19 장애 결함 4).
+/// 1s 지수 백오프 + 30s 상한으로 12회 ≈ 271s — 서버 대기 안에서 끝까지 버틴다.
+const int kWsMaxRetries = 12;
+const Duration kWsMaxBackoff = Duration(seconds: 30);
+
 class WsClient {
   final Map<String, dynamic> _headers;
   final String? _baseHttpUrl;
@@ -65,8 +72,9 @@ class WsClient {
     required String sessionId,
     required String webSocketUrl,
     required void Function(String) onText,
-    int maxRetries = 2,
+    int maxRetries = kWsMaxRetries,
     Duration initialBackoff = const Duration(seconds: 1),
+    Duration maxBackoff = kWsMaxBackoff,
     void Function(int attempt)? onReconnectAttempt,
     void Function()? onReconnected,
     void Function(Object error)? onPermanentFailure,
@@ -96,6 +104,7 @@ class WsClient {
           onDone: () => _handleDisconnect(
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
+            maxBackoff: maxBackoff,
             onReconnectAttempt: onReconnectAttempt,
             onReconnected: onReconnected,
             onPermanentFailure: onPermanentFailure,
@@ -105,6 +114,7 @@ class WsClient {
             error: e,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
+            maxBackoff: maxBackoff,
             onReconnectAttempt: onReconnectAttempt,
             onReconnected: onReconnected,
             onPermanentFailure: onPermanentFailure,
@@ -121,6 +131,7 @@ class WsClient {
           error: e,
           maxRetries: maxRetries,
           initialBackoff: initialBackoff,
+          maxBackoff: maxBackoff,
           onReconnectAttempt: onReconnectAttempt,
           onReconnected: onReconnected,
           onPermanentFailure: onPermanentFailure,
@@ -136,6 +147,7 @@ class WsClient {
     Object? error,
     required int maxRetries,
     required Duration initialBackoff,
+    required Duration maxBackoff,
     required void Function(int attempt)? onReconnectAttempt,
     required void Function()? onReconnected,
     required void Function(Object error)? onPermanentFailure,
@@ -151,8 +163,13 @@ class WsClient {
     if (_currentRetry <= maxRetries) {
       _currentRetry += 1;
       onReconnectAttempt?.call(_currentRetry);
-      final backoffMillis =
+      // Uncapped doubling would reach ~34min by retry 12 — cap keeps the
+      // whole budget inside the server's 5-minute reconnect window.
+      final rawMillis =
           initialBackoff.inMilliseconds * (1 << (_currentRetry - 1));
+      final backoffMillis = rawMillis > maxBackoff.inMilliseconds
+          ? maxBackoff.inMilliseconds
+          : rawMillis;
       await Future.delayed(Duration(milliseconds: backoffMillis));
       await attemptConnect();
     } else {
