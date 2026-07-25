@@ -18,6 +18,10 @@ jobs:
           flutter-version: 3.44.8
           cache: true
 
+      # .env* are gitignored but declared as assets in pubspec.yaml;
+      # analyze fails on asset_does_not_exist without placeholders
+      - run: touch .env .env.dev .env.prod
+
       - run: flutter pub get
 
       - run: flutter analyze
