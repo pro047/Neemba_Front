@@ -19,7 +19,7 @@ String? validateRtmpUrl(String url) {
     return '잘못된 경로입니다';
   }
 
-  if (uri.pathSegments.length < 1) {
+  if (uri.pathSegments.isEmpty) {
     return '스트림 키가 없습니다';
   }
 

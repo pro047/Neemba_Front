@@ -135,7 +135,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     final current = micTtsService.currentSpeakingIndex;
     final isStarting = _isStartingMic || asyncMicResult.isLoading;
 
-    Widget WaitingView() {
+    Widget waitingView() {
       print(ref.read(inputStateProvider.notifier).state);
       return Padding(
         padding: const EdgeInsets.all(16),
@@ -153,7 +153,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: sourceLangCode,
+                    initialValue: sourceLangCode,
                     items: const [
                       DropdownMenuItem(value: 'ko-KR', child: Text('Korean')),
                     ],
@@ -169,7 +169,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: targetLangCode,
+                    initialValue: targetLangCode,
                     items:
                         targetLanguageOptions
                             .map(
@@ -205,7 +205,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                           try {
                             _setStartingMic(true);
                             ref.read(inputStateProvider.notifier).state =
-                                inputState.mic;
+                                InputState.mic;
 
                             await ref
                                 .read(micClientProvider)
@@ -326,7 +326,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       );
     }
 
-    Widget SuccessView() {
+    Widget successView() {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -417,7 +417,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       );
     }
 
-    Widget ErrorView(String? msg) {
+    Widget errorView(String? msg) {
       return Padding(
         padding: EdgeInsetsGeometry.all(16),
         child: Center(child: Text(msg ?? '')),
@@ -428,14 +428,14 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       data: (data) {
         switch (data.status) {
           case ScreenState.waiting:
-            return WaitingView();
+            return waitingView();
           case ScreenState.succeed:
-            return SuccessView();
+            return successView();
           case ScreenState.failed:
-            return ErrorView(data.error);
+            return errorView(data.error);
         }
       },
-      error: (e, st) => ErrorView(e.toString()),
+      error: (e, st) => errorView(e.toString()),
       loading:
           () => const Center(
             child: Column(
