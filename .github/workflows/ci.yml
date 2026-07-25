@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  flutter-analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to the same version as local dev to keep results identical
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+
+      # .env* are gitignored but declared as assets in pubspec.yaml;
+      # analyze fails on asset_does_not_exist without placeholders
+      - run: touch .env .env.dev .env.prod
+
+      - run: flutter pub get
+
+      - run: flutter analyze

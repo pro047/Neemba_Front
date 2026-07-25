@@ -95,7 +95,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     final asyncRtmpResult = ref.watch(startSessionResultProvider);
     final current = textToSpeechService.currentSpeakingIndex;
 
-    Widget WaitingView() {
+    Widget waitingView() {
       print(ref.read(inputStateProvider.notifier).state);
       return Padding(
         padding: const EdgeInsets.all(16),
@@ -113,7 +113,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: sourceLangCode,
+                    initialValue: sourceLangCode,
                     items: const [
                       DropdownMenuItem(value: 'ko-KR', child: Text('Korean')),
                     ],
@@ -129,7 +129,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: targetLangCode,
+                    initialValue: targetLangCode,
                     items:
                         targetLanguageOptions
                             .map(
@@ -161,7 +161,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                         ? null
                         : () async {
                           ref.read(inputStateProvider.notifier).state =
-                              inputState.rtmp;
+                              InputState.rtmp;
 
                           await ref
                               .read(restClientProvider)
@@ -245,7 +245,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       );
     }
 
-    Widget SuccessView() {
+    Widget successView() {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -326,7 +326,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       );
     }
 
-    Widget ErrorView(String? msg) {
+    Widget errorView(String? msg) {
       return Padding(
         padding: EdgeInsetsGeometry.all(16),
         child: Center(child: Text(msg ?? '')),
@@ -337,14 +337,14 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       data: (data) {
         switch (data.status) {
           case ScreenState.waiting:
-            return WaitingView();
+            return waitingView();
           case ScreenState.succeed:
-            return SuccessView();
+            return successView();
           case ScreenState.failed:
-            return ErrorView(data.error);
+            return errorView(data.error);
         }
       },
-      error: (e, st) => ErrorView(e.toString()),
+      error: (e, st) => errorView(e.toString()),
       loading: () => const Center(child: CircularProgressIndicator()),
     );
   }

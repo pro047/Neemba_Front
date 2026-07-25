@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:flutter_audio_capture/flutter_audio_capture.dart';
 import 'package:flutter/foundation.dart';
