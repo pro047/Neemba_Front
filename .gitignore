@@ -47,6 +47,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Xcode build cache (in-project DerivedData location)
+**/DerivedData/
+
 ios/Pods/
 ios/.symlinks/
 ios/Flutter/Flutter.framework
