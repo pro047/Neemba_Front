@@ -55,6 +55,32 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.4
+
+# Launcher icon generation. Source image is not bundled into the app —
+# it is only read by `dart run flutter_launcher_icons`.
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+
+  android: true
+  # Adaptive icon layers. The foreground must keep its artwork inside the
+  # central 66% — launchers mask the outer area into circles, squircles, etc.
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+
+  ios: true
+  # App Store rejects icons with an alpha channel; flatten it during generation.
+  remove_alpha_ios: true
+
+  web:
+    generate: true
+    background_color: "#FFFFFF"
+    theme_color: "#FFFFFF"
+
+  macos:
+    generate: true
+  windows:
+    generate: true
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
