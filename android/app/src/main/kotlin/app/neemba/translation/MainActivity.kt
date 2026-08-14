@@ -1,4 +1,4 @@
-package com.example.mvp
+package app.neemba.translation
 
 import android.Manifest
 import android.content.pm.PackageManager
