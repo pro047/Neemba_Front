@@ -56,3 +56,7 @@ ios/Flutter/Flutter.framework
 ios/Flutter/Flutter.podspec
 android/.gradle/
 android/captures/
+.pipeline/
+# Session handoff notes — records unresolved server-side vulnerabilities and
+# device identifiers. This remote is public, so it stays local.
+HANDOFF.json
