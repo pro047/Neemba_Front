@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
+import 'package:mvp/log.dart';
 import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/type.dart';
 
@@ -12,17 +13,17 @@ class RestClient {
 
   Future<String> ping() async {
     try {
-      print('Call => ${config.httpUrl}/api/ping');
+      logD('Call => ${config.httpUrl}/api/ping');
       final url = Uri.parse('${config.httpUrl}/api/ping');
       final response = await http.get(url).timeout(const Duration(seconds: 5));
 
-      print(
+      logD(
         'res <= status = ${response.statusCode} headers = ${response.headers} body = ${response.body}',
       );
 
       return response.body;
     } catch (err) {
-      print(err);
+      logD(err);
       throw Exception('$err');
     }
   }
@@ -36,7 +37,7 @@ class RestClient {
       ref.read(startSessionResultProvider.notifier).state =
           const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/sessions/start');
-      print(
+      logD(
         'Start button -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
       );
       final result = await AsyncValue.guard(() async {
@@ -48,16 +49,16 @@ class RestClient {
             'targetLang': targetLang,
           }),
         );
-        print(
+        logD(
           'start session : status=${response.statusCode} contentType=${response.headers['content-type']}',
         );
         final data = jsonDecode(response.body);
         return StartSessionResponse.fromJson(data);
       });
-      print('result $result');
+      logD('result $result');
       ref.read(startSessionResultProvider.notifier).state = result;
     } catch (err) {
-      print('start err : $err');
+      logD('start err : $err');
       throw Exception('start error');
     }
   }

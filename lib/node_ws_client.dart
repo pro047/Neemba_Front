@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
+import 'package:mvp/log.dart';
 
 class NodeWsClientStats {
   final String? sessionId;
@@ -32,7 +33,9 @@ class NodeWsClientStats {
 
   @override
   String toString() {
-    return 'sessionId=$sessionId connected=$connected sentFrames=$sentFrames sentBytes=$sentBytes queuedFrames=$queuedFrames queuedBytes=$queuedBytes droppedFrames=$droppedFrames droppedBytes=$droppedBytes reconnectAttempts=$reconnectAttempts reconnectSuccesses=$reconnectSuccesses connectedAt=${connectedAt?.toIso8601String()}';
+    // Masked here rather than at each call site: this one string feeds every
+    // uplink log line, so an unmasked id would leak from eight places at once.
+    return 'sessionId=${maskId(sessionId)} connected=$connected sentFrames=$sentFrames sentBytes=$sentBytes queuedFrames=$queuedFrames queuedBytes=$queuedBytes droppedFrames=$droppedFrames droppedBytes=$droppedBytes reconnectAttempts=$reconnectAttempts reconnectSuccesses=$reconnectSuccesses connectedAt=${connectedAt?.toIso8601String()}';
   }
 }
 
@@ -144,7 +147,7 @@ class NodeWsClient {
 
   Future<void> _connectInternal(String sessionId) async {
     final uri = _buildMicUri(sessionId);
-    debugPrint('mic websocket connect: $uri');
+    logD('mic websocket connect: ${maskUrl(uri)}');
     final socket = await WebSocket.connect(uri.toString());
     socket.pingInterval = const Duration(seconds: 20);
     _connectedUri = uri;
@@ -157,7 +160,7 @@ class NodeWsClient {
       _reconnectSuccesses += 1;
     }
 
-    debugPrint('mic websocket connected: ${stats.toString()}');
+    logD('mic websocket connected: ${stats.toString()}');
 
     socket.listen(
       (_) {},
@@ -208,7 +211,7 @@ class NodeWsClient {
       _pendingBytes -= dropped.length;
       _droppedFrames += 1;
       _droppedBytes += dropped.length;
-      debugPrint('mic websocket dropped buffered frame: ${stats.toString()}');
+      logD('mic websocket dropped buffered frame: ${stats.toString()}');
     }
   }
 
@@ -226,7 +229,7 @@ class NodeWsClient {
     }
 
     if (_sentFrames > 0) {
-      debugPrint('mic websocket flushed pending frames: ${stats.toString()}');
+      logD('mic websocket flushed pending frames: ${stats.toString()}');
     }
   }
 
@@ -246,7 +249,7 @@ class NodeWsClient {
     }
     _sessionLostReported = true;
     _manualClose = true;
-    debugPrint('mic websocket session lost: $reason ${stats.toString()}');
+    logD('mic websocket session lost: $reason ${stats.toString()}');
     _pendingFrames.clear();
     _pendingBytes = 0;
     _onSessionLost?.call(reason);
@@ -273,7 +276,7 @@ class NodeWsClient {
       attempt += 1;
       _reconnectAttempts += 1;
       final waitSeconds = attempt > 5 ? 5 : attempt;
-      debugPrint(
+      logD(
         'mic websocket reconnect scheduled: attempt=$attempt waitSeconds=$waitSeconds ${stats.toString()}',
       );
       await Future.delayed(Duration(seconds: waitSeconds));
@@ -298,7 +301,7 @@ class NodeWsClient {
         await _connectInternal(sessionId);
         break;
       } catch (error) {
-        debugPrint('mic websocket reconnect failed: $error');
+        logD('mic websocket reconnect failed: $error');
       }
     }
 
@@ -316,7 +319,7 @@ class NodeWsClient {
     _connectedAt = null;
     await _webSocket?.close();
     _webSocket = null;
-    debugPrint('mic websocket closed: ${stats.toString()}');
+    logD('mic websocket closed: ${stats.toString()}');
   }
 
   void _recordSentFrame(int byteLength) {
@@ -324,7 +327,7 @@ class NodeWsClient {
     _sentBytes += byteLength;
 
     if (_sentFrames % 50 == 0) {
-      debugPrint('mic websocket stats: ${stats.toString()}');
+      logD('mic websocket stats: ${stats.toString()}');
     }
   }
 
@@ -338,6 +341,6 @@ class NodeWsClient {
     _connectedAt = null;
     _pendingFrames.clear();
     _pendingBytes = 0;
-    debugPrint('mic websocket stats reset: sessionId=$sessionId');
+    logD('mic websocket stats reset: sessionId=${maskId(sessionId)}');
   }
 }

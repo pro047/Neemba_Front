@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/language_option.dart';
+import 'package:mvp/log.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
 import 'package:mvp/provider/result_provider.dart';
@@ -164,7 +165,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   /// The first connection is awaited now, so its failure arrives here as a
   /// throw. Leaving the session alive on the server would strand it.
   Future<void> _handleRtmpStartFailure(Object error) async {
-    debugPrint('rtmp start failure: $error');
+    logD('rtmp start failure: $error');
     if (!mounted) {
       return;
     }
@@ -177,7 +178,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       try {
         await restClient.stopSession(session.sessionId);
       } catch (stopError) {
-        debugPrint('rtmp session stop failed: $stopError');
+        logD('rtmp session stop failed: $stopError');
       }
     }
 
@@ -198,7 +199,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
         screenFlowController.reset();
         startSessionResultController.state = const AsyncValue.data(null);
       } catch (error) {
-        debugPrint('rtmp session state reset skipped: $error');
+        logD('rtmp session state reset skipped: $error');
       }
     });
   }
@@ -217,7 +218,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     try {
       await restClient.stopSession(session.sessionId);
     } catch (error) {
-      debugPrint('rtmp session cleanup failed: $error');
+      logD('rtmp session cleanup failed: $error');
     }
   }
 
@@ -226,7 +227,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       // Events that land after dispose have nowhere to go — drop them.
       return;
     }
-    print(text);
+    logD(text);
     texts.add(text);
     textToSpeechService.enqueue(text, language: _targetLanguage.ttsLocale);
     setState(() {});
@@ -281,7 +282,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     final current = textToSpeechService.currentSpeakingIndex;
 
     Widget waitingView() {
-      print(ref.read(inputStateProvider.notifier).state);
+      logD(ref.read(inputStateProvider.notifier).state);
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -394,7 +395,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                     try {
                       await restClient.stopSession(session.sessionId);
                     } catch (error) {
-                      debugPrint('rtmp session stop failed: $error');
+                      logD('rtmp session stop failed: $error');
                     }
                   }
 

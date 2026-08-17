@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/language_option.dart';
+import 'package:mvp/log.dart';
 import 'package:mvp/mic_client.dart';
 import 'package:mvp/mic_server_tts_service.dart';
 import 'package:mvp/node_ws_client.dart';
@@ -86,7 +87,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
         screenFlowController.reset();
         micResultController.state = const AsyncValue.data(null);
       } catch (error) {
-        debugPrint('mic session state reset skipped: $error');
+        logD('mic session state reset skipped: $error');
       }
     });
   }
@@ -108,7 +109,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       await audioCapture.stopCapture();
       await nodeWs.close();
     } catch (error) {
-      debugPrint('mic capture abandon failed: $error');
+      logD('mic capture abandon failed: $error');
     }
   }
 
@@ -131,7 +132,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     try {
       await micClient.stopSession(session.sessionId);
     } catch (error) {
-      debugPrint('mic session cleanup failed: $error');
+      logD('mic session cleanup failed: $error');
     }
   }
 
@@ -146,7 +147,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     try {
       await micClient.stopSession(orphan.sessionId);
     } catch (error) {
-      debugPrint('orphan mic session stop failed: $error');
+      logD('orphan mic session stop failed: $error');
     }
   }
 
@@ -159,7 +160,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       // dispose() owns the teardown once we are unmounted.
       return;
     }
-    debugPrint('mic start failure: $error');
+    logD('mic start failure: $error');
     ref.read(screenFlowProvider.notifier).reset();
     await _shutdownSession(session);
 
@@ -186,7 +187,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       // Events that land after dispose have nowhere to go — drop them.
       return;
     }
-    print(text);
+    logD(text);
     texts.add(text);
     unawaited(micTtsService.enqueue(text, language: _targetLanguage.ttsLocale));
     setState(() {});
@@ -219,7 +220,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     final isStarting = _isStartingMic || asyncMicResult.isLoading;
 
     Widget waitingView() {
-      print(ref.read(inputStateProvider.notifier).state);
+      logD(ref.read(inputStateProvider.notifier).state);
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -397,7 +398,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                             texts = [];
                             setState(() {});
 
-                            print(ref.read(inputStateProvider.notifier).state);
+                            logD(ref.read(inputStateProvider.notifier).state);
                           } catch (error) {
                             await _handleMicStartFailure(
                               session,
@@ -487,7 +488,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                     try {
                       await micClient.stopSession(session.sessionId);
                     } catch (error) {
-                      debugPrint('mic session stop failed: $error');
+                      logD('mic session stop failed: $error');
                     }
                   }
 

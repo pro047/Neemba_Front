@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:mvp/log.dart';
 
 class _SpeechRequest {
   final String text;
@@ -45,18 +46,18 @@ class TextToSpeechService {
     await _tts.setPitch(1.0);
     await _tts.awaitSpeakCompletion(true);
     _tts.setStartHandler(() {
-      print('tts start');
+      logD('tts start');
     });
     _tts.setCompletionHandler(() {
-      print('tts complete');
+      logD('tts complete');
       _completeSpeechOutcome();
     });
     _tts.setErrorHandler((message) {
-      print('tts error: $message');
+      logD('tts error: $message');
       _completeSpeechOutcome(message);
     });
     _tts.setCancelHandler(() {
-      print('tts cancel');
+      logD('tts cancel');
       _completeSpeechOutcome('cancelled');
     });
   }
@@ -73,12 +74,12 @@ class TextToSpeechService {
     final text = sentence.trim();
     if (text.isEmpty) return;
     if (_closed) {
-      print('tts enqueue ignored: service closed');
+      logD('tts enqueue ignored: service closed');
       return;
     }
 
     _queue.add(_SpeechRequest(text: text, language: language));
-    print('tts enqueue: language=$language text=$text');
+    logD('tts enqueue: language=$language text=$text');
 
     if (!_isRunning) {
       unawaited(_drainQueue());
@@ -119,7 +120,7 @@ class TextToSpeechService {
       language,
       fallbackLanguage: fallbackLanguage,
     );
-    print('tts manual speak: requested=$language resolved=$resolvedLanguage');
+    logD('tts manual speak: requested=$language resolved=$resolvedLanguage');
     await _speakWithFallback(
       text,
       requestedLanguage: resolvedLanguage,
@@ -134,7 +135,7 @@ class TextToSpeechService {
       fallbackLanguage: 'en-US',
     );
     try {
-      print(
+      logD(
         'tts autoplay speak: requested=${request.language} resolved=$resolvedLanguage text=${request.text}',
       );
       await _speakWithFallback(
@@ -143,7 +144,7 @@ class TextToSpeechService {
         fallbackLanguage: 'en-US',
       );
     } catch (error) {
-      print('tts autoplay retry after error: $error');
+      logD('tts autoplay retry after error: $error');
       await Future.delayed(const Duration(milliseconds: 120));
       await _tts.speak(request.text);
     }
@@ -170,7 +171,7 @@ class TextToSpeechService {
       try {
         await _performSpeak(text, candidate);
         if (candidate != requestedLanguage) {
-          print(
+          logD(
             'tts fallback candidate success: requested=$requestedLanguage resolved=$candidate',
           );
         }
@@ -178,7 +179,7 @@ class TextToSpeechService {
       } on _TtsSpeakError catch (error) {
         _languageAvailability[candidate] = false;
         lastError = error;
-        print(
+        logD(
           'tts candidate failed: requested=$requestedLanguage candidate=$candidate error=$error',
         );
       }
@@ -228,7 +229,7 @@ class TextToSpeechService {
     }
 
     final availability = await _tts.isLanguageAvailable(language);
-    print('tts language availability: language=$language raw=$availability');
+    logD('tts language availability: language=$language raw=$availability');
     final isAvailable =
         availability == true || availability == 1 || availability == 2;
     _languageAvailability[language] = isAvailable;

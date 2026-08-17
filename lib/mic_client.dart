@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
+import 'package:mvp/log.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
 import 'package:mvp/type.dart';
 
@@ -12,17 +13,17 @@ class MicClient {
 
   Future<String> ping() async {
     try {
-      print('Call => ${config.httpUrl}/api/mic/ping');
+      logD('Call => ${config.httpUrl}/api/mic/ping');
       final url = Uri.parse('${config.httpUrl}/api/mic/ping');
       final response = await http.get(url).timeout(const Duration(seconds: 5));
 
-      print(
+      logD(
         'res <= status = ${response.statusCode} headers = ${response.headers} body = ${response.body}',
       );
 
       return response.body;
     } catch (err) {
-      print(err);
+      logD(err);
       throw Exception('$err');
     }
   }
@@ -35,7 +36,7 @@ class MicClient {
     try {
       ref.read(micResultProvider.notifier).state = const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/mic/start');
-      print(
+      logD(
         'Start button (mic) -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
       );
       final result = await AsyncValue.guard(() async {
@@ -54,10 +55,10 @@ class MicClient {
         final data = jsonDecode(response.body);
         return StartSessionResponse.fromJson(data);
       });
-      print('result $result');
+      logD('result $result');
       ref.read(micResultProvider.notifier).state = result;
     } catch (err) {
-      print('start err : $err');
+      logD('start err : $err');
       throw Exception('start error');
     }
   }

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 
 import 'package:web_socket_channel/io.dart';
+import 'package:mvp/log.dart';
 
 /// ws 재시도 예산.
 ///
@@ -98,20 +99,20 @@ class WsClient {
     required String webSocketUrl,
     required void Function(String) onText,
   }) async {
-    print('WS connect (single) session=$sessionId raw=$webSocketUrl');
+    logD('WS connect (single) session=${maskId(sessionId)} raw=${maskUrl(webSocketUrl)}');
     final url = _buildUri(webSocketUrl);
-    print('webSocket url : $url');
+    logD('webSocket url : ${maskUrl(url)}');
     _channel = IOWebSocketChannel.connect(url, headers: _headers);
     _channel!.stream.listen(
       (event) {
-        print('event : $event');
+        logD('event : $event');
         if (_isPingEvent(event)) {
           return;
         }
         onText(event);
       },
-      onDone: () => print('ws closed'),
-      onError: (e) => print('ws error $e'),
+      onDone: () => logD('ws closed'),
+      onError: (e) => logD('ws error $e'),
     );
   }
 
@@ -136,12 +137,12 @@ class WsClient {
     try {
       await subscription?.cancel().timeout(kWsCloseTimeout);
     } catch (error) {
-      print('ws subscription cancel failed: $error');
+      logD('ws subscription cancel failed: $error');
     }
     try {
       await channel?.sink.close().timeout(kWsCloseTimeout);
     } catch (error) {
-      print('ws channel close failed: $error');
+      logD('ws channel close failed: $error');
     }
   }
 
@@ -163,7 +164,7 @@ class WsClient {
     void Function()? onReconnected,
     void Function(Object error)? onPermanentFailure,
   }) async {
-    print('WS connect (retry) session=$sessionId raw=$webSocketUrl');
+    logD('WS connect (retry) session=${maskId(sessionId)} raw=${maskUrl(webSocketUrl)}');
     _shouldReconnect = true;
     _currentRetry = 0;
 
@@ -174,8 +175,9 @@ class WsClient {
     Future<void> attemptConnect() async {
       if (!_shouldReconnect) return;
       final url = _buildUri(webSocketUrl);
-      print(
-        'webSocket url (session $sessionId, retry #$_currentRetry): $url',
+      logD(
+        'webSocket url (session ${maskId(sessionId)}, retry #$_currentRetry): '
+        '${maskUrl(url)}',
       );
       // The previous attempt's channel may have died mid-handshake; discarding
       // it must not stall the retry that is trying to replace it.
@@ -191,7 +193,7 @@ class WsClient {
       await _channel!.ready;
       _subscription = _channel!.stream.listen(
           (event) {
-            print('event : $event');
+            logD('event : $event');
             if (_isPingEvent(event)) {
               return;
             }
@@ -273,16 +275,16 @@ class WsClient {
     required Future<void> Function() attemptConnect,
   }) async {
     if (!_shouldReconnect) {
-      print('ws closed manually');
+      logD('ws closed manually');
       return;
     }
 
-    print('ws disconnected: $error (close code $closeCode)');
+    logD('ws disconnected: $error (close code $closeCode)');
 
     if (closeCode == kWsSessionNotFound) {
       // The server says this session is not live. Nothing to come back to, so
       // stop here instead of spending the rest of the budget on a dead id.
-      print('ws session gone (close code $closeCode) — giving up');
+      logD('ws session gone (close code $closeCode) — giving up');
       _shouldReconnect = false;
       onPermanentFailure?.call(error ?? 'session not found');
       return;

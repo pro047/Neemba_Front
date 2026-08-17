@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
 import 'package:mvp/api_config.dart';
+import 'package:mvp/log.dart';
 
 class _ServerSpeechRequest {
   final String text;
@@ -145,13 +146,13 @@ class MicServerTtsService {
             continue;
           }
           if (response.usedFallback) {
-            print(
+            logD(
               'mic server tts fallback: requested=${request.language} fallback=${request.fallbackLanguage}',
             );
           }
           await _playBytes(response.audioBytes, generation: generation);
         } catch (error) {
-          print('mic server tts autoplay failed: $error');
+          logD('mic server tts autoplay failed: $error');
         }
       }
     } finally {

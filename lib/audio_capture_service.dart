@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter_audio_capture/flutter_audio_capture.dart';
 import 'package:flutter/foundation.dart';
+import 'package:mvp/log.dart';
 
 Uint8List convertToPcm16Le(Float32List samples) {
   final bytes = ByteData(samples.length * 2);
@@ -106,7 +107,7 @@ class AudioCaptureService {
     _resetStats();
     _isCapturing = true;
     await _plugin.start(listener, onError, sampleRate: kRequestedSampleRate);
-    debugPrint('mic capture start: ${stats.toString()}');
+    logD('mic capture start: ${stats.toString()}');
   }
 
   Future<void> stopCapture() async {
@@ -114,7 +115,7 @@ class AudioCaptureService {
     final snapshot = stats;
     _onAudioFrame = null;
     _isCapturing = false;
-    debugPrint('mic capture stop: ${snapshot.toString()}');
+    logD('mic capture stop: ${snapshot.toString()}');
   }
 
   void listener(Float32List obj) {
@@ -139,7 +140,7 @@ class AudioCaptureService {
       if (actual != null) {
         _rateReported = true;
         final mismatch = (actual - kRequestedSampleRate).abs() > 1;
-        debugPrint(
+        logD(
           'mic capture rate: requested=$kRequestedSampleRate '
           'actual=${actual.toStringAsFixed(0)}'
           '${mismatch ? " MISMATCH — audio reaches STT time-warped" : ""}',
@@ -148,14 +149,14 @@ class AudioCaptureService {
     }
 
     if (_frameCount % 50 == 0) {
-      debugPrint('mic capture stats: ${stats.toString()}');
+      logD('mic capture stats: ${stats.toString()}');
     }
 
     _onAudioFrame?.call(data);
   }
 
   void onError(Object e) {
-    debugPrint('mic capture error: $e');
+    logD('mic capture error: $e');
   }
 
   void _resetStats() {
