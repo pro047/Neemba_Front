@@ -4,4 +4,15 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Cleartext is permitted for debug builds only. .env.dev points at
+         http://localhost:8080, so development needs it; production is
+         https://neemba.app and does not. Leaving it on in release would let an
+         attacker downgrade HTTPS to HTTP.
+
+         The manifest merger folds these attributes into the main
+         <application> element, and res/xml/network_security_config.xml lives
+         in this source set for the same reason. -->
+    <application
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config" />
 </manifest>
