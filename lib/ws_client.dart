@@ -94,28 +94,6 @@ class WsClient {
     return rawUri.replace(scheme: scheme, host: base.host, port: port);
   }
 
-  Future<void> connect({
-    required String sessionId,
-    required String webSocketUrl,
-    required void Function(String) onText,
-  }) async {
-    logD('WS connect (single) session=${maskId(sessionId)} raw=${maskUrl(webSocketUrl)}');
-    final url = _buildUri(webSocketUrl);
-    logD('webSocket url : ${maskUrl(url)}');
-    _channel = IOWebSocketChannel.connect(url, headers: _headers);
-    _channel!.stream.listen(
-      (event) {
-        logD('event : $event');
-        if (_isPingEvent(event)) {
-          return;
-        }
-        onText(event);
-      },
-      onDone: () => logD('ws closed'),
-      onError: (e) => logD('ws error $e'),
-    );
-  }
-
   /// Stops the retry loop without touching the socket. Callers that are about
   /// to tear down local resources use this first: it is synchronous, so no
   /// "연결 끊김" toast can fire while the teardown runs.
