@@ -16,6 +16,8 @@ Uint8List convertToPcm16Le(Float32List samples) {
   return bytes.buffer.asUint8List();
 }
 
+const int kRequestedSampleRate = 16000;
+
 class AudioCaptureStats {
   final bool isCapturing;
   final int frameCount;
@@ -25,6 +27,7 @@ class AudioCaptureStats {
   final double lastPeak;
   final double avgRms;
   final int lowLevelFrameCount;
+  final double? actualSampleRate;
   final DateTime? startedAt;
   final DateTime? lastFrameAt;
 
@@ -37,6 +40,7 @@ class AudioCaptureStats {
     required this.lastPeak,
     required this.avgRms,
     required this.lowLevelFrameCount,
+    required this.actualSampleRate,
     required this.startedAt,
     required this.lastFrameAt,
   });
@@ -44,13 +48,21 @@ class AudioCaptureStats {
   Duration get elapsed =>
       startedAt == null ? Duration.zero : DateTime.now().difference(startedAt!);
 
+  // Samples actually delivered per wall-clock second. The server treats every
+  // byte as 16 kHz PCM, so a gap between this and kRequestedSampleRate means
+  // audio reaches STT time-warped — independent of what the plugin reports.
+  double get measuredSampleRate {
+    final millis = elapsed.inMilliseconds;
+    return millis == 0 ? 0 : sampleCount * 1000 / millis;
+  }
+
   @override
   String toString() {
     final millis = elapsed.inMilliseconds;
     final lowLevelRatio = frameCount == 0
         ? 0.0
         : lowLevelFrameCount / frameCount;
-    return 'capturing=$isCapturing frames=$frameCount bytes=$byteCount samples=$sampleCount elapsedMs=$millis lastRms=${lastRms.toStringAsFixed(4)} lastPeak=${lastPeak.toStringAsFixed(4)} avgRms=${avgRms.toStringAsFixed(4)} lowLevelFrames=$lowLevelFrameCount lowLevelRatio=${lowLevelRatio.toStringAsFixed(2)} lastFrameAt=${lastFrameAt?.toIso8601String()}';
+    return 'capturing=$isCapturing frames=$frameCount bytes=$byteCount samples=$sampleCount elapsedMs=$millis lastRms=${lastRms.toStringAsFixed(4)} lastPeak=${lastPeak.toStringAsFixed(4)} avgRms=${avgRms.toStringAsFixed(4)} lowLevelFrames=$lowLevelFrameCount lowLevelRatio=${lowLevelRatio.toStringAsFixed(2)} requestedRate=$kRequestedSampleRate actualRate=${actualSampleRate?.toStringAsFixed(0) ?? "unknown"} measuredRate=${measuredSampleRate.toStringAsFixed(0)} lastFrameAt=${lastFrameAt?.toIso8601String()}';
   }
 }
 
@@ -67,6 +79,7 @@ class AudioCaptureService {
   double _lastPeak = 0;
   double _rmsSum = 0;
   int _lowLevelFrameCount = 0;
+  bool _rateReported = false;
   DateTime? _startedAt;
   DateTime? _lastFrameAt;
 
@@ -79,6 +92,7 @@ class AudioCaptureService {
     lastPeak: _lastPeak,
     avgRms: _frameCount == 0 ? 0 : _rmsSum / _frameCount,
     lowLevelFrameCount: _lowLevelFrameCount,
+    actualSampleRate: _plugin.actualSampleRate,
     startedAt: _startedAt,
     lastFrameAt: _lastFrameAt,
   );
@@ -91,7 +105,7 @@ class AudioCaptureService {
     _onAudioFrame = onAudioFrame;
     _resetStats();
     _isCapturing = true;
-    await _plugin.start(listener, onError, sampleRate: 16000);
+    await _plugin.start(listener, onError, sampleRate: kRequestedSampleRate);
     debugPrint('mic capture start: ${stats.toString()}');
   }
 
@@ -117,6 +131,22 @@ class AudioCaptureService {
     }
     _lastFrameAt = DateTime.now();
 
+    // The hardware may negotiate a rate other than the one we asked for, and
+    // nothing downstream would notice: the server reads every byte as 16 kHz.
+    // Report it once, as soon as the plugin knows it.
+    if (!_rateReported) {
+      final actual = _plugin.actualSampleRate;
+      if (actual != null) {
+        _rateReported = true;
+        final mismatch = (actual - kRequestedSampleRate).abs() > 1;
+        debugPrint(
+          'mic capture rate: requested=$kRequestedSampleRate '
+          'actual=${actual.toStringAsFixed(0)}'
+          '${mismatch ? " MISMATCH — audio reaches STT time-warped" : ""}',
+        );
+      }
+    }
+
     if (_frameCount % 50 == 0) {
       debugPrint('mic capture stats: ${stats.toString()}');
     }
@@ -137,6 +167,7 @@ class AudioCaptureService {
     _lastPeak = 0;
     _rmsSum = 0;
     _lowLevelFrameCount = 0;
+    _rateReported = false;
     _startedAt = now;
     _lastFrameAt = null;
   }
