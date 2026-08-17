@@ -62,12 +62,19 @@ class RestClient {
     }
   }
 
-  Future<void> stopSession(WidgetRef ref, String sessionId) async {
+  /// No `ref` parameter: this runs after the caller's widget is disposed, and
+  /// a Ref is unusable at that point — taking one invites a caller to reach
+  /// through it and crash.
+  Future<void> stopSession(String sessionId) async {
     final url = Uri.parse('${config.httpUrl}/api/sessions/stop');
-    await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'sessionId': sessionId}),
-    );
+    await http
+        .post(
+          url,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'sessionId': sessionId}),
+        )
+        // A hung stop would otherwise strand the dead session in state and get
+        // re-issued on the next teardown.
+        .timeout(const Duration(seconds: 10));
   }
 }

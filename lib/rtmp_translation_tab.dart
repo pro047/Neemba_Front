@@ -1,12 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/language_option.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
 import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/provider/screen_change_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
+import 'package:mvp/rest_client.dart';
 import 'package:mvp/tts_service.dart';
+import 'package:mvp/type.dart';
 import 'package:mvp/ws_client.dart';
 
 class RtmpTranslationTab extends ConsumerStatefulWidget {
@@ -22,9 +27,16 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   String sourceLangCode = 'ko-KR',
       targetLangCode = englishTargetLanguage.translationCode;
   late final TextToSpeechService textToSpeechService;
+  // Cached in initState so teardown never needs `ref` after dispose.
+  late final WsClient wsClient;
+  late final RestClient restClient;
+  late final ScreenFlowController screenFlowController;
+  late final StateController<AsyncValue<StartSessionResponse?>>
+  startSessionResultController;
   List<String> texts = <String>[];
   late final ScrollController _scrollController;
   bool _shouldAutoScroll = true;
+  bool _isStartingRtmp = false;
 
   TargetLanguageOption get _targetLanguage =>
       targetLanguageOptionForCode(targetLangCode);
@@ -32,18 +44,185 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   @override
   void initState() {
     textToSpeechService = widget.service;
+    wsClient = ref.read(wsClientProvider);
+    restClient = ref.read(restClientProvider);
+    screenFlowController = ref.read(screenFlowProvider.notifier);
+    startSessionResultController = ref.read(startSessionResultProvider.notifier);
     _scrollController = ScrollController()..addListener(_handleScroll);
     super.initState();
   }
 
   @override
   void dispose() {
+    // Swiping to the other tab disposes this State. `ref` is already unsafe
+    // here (Riverpod throws once the widget is deactivated), so dispose talks
+    // only to the notifiers cached in initState.
+    final session = startSessionResultController.state.value;
+    if (session != null) {
+      _resetSessionStateLater();
+    }
+    unawaited(_shutdownSession(session));
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
     super.dispose();
   }
 
+  void _setStartingRtmp(bool value) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isStartingRtmp = value;
+    });
+  }
+
+  /// Start is not re-entrant: connectWithRetry can run for seconds, and a
+  /// second press would re-enter the shared WsClient, resetting the first
+  /// chain's retry counter and racing two chains over one channel.
+  Future<void> _handleRtmpStart() async {
+    _setStartingRtmp(true);
+    try {
+      ref.read(inputStateProvider.notifier).state = InputState.rtmp;
+
+      await restClient.startSession(
+        ref,
+        sourceLang: sourceLangCode,
+        targetLang: targetLangCode,
+      );
+
+      if (!mounted) {
+        // dispose() owns the teardown from here on.
+        return;
+      }
+
+      // AsyncValue.guard swallows the failure into an AsyncError, so the null
+      // check has to come BEFORE the screen flips — otherwise a failed start
+      // lands on a "translating" screen with no session.
+      final value = startSessionResultController.state.value;
+      if (value == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('create session failed')),
+        );
+        return;
+      }
+
+      screenFlowController.start();
+
+      await wsClient.connectWithRetry(
+        sessionId: value.sessionId,
+        webSocketUrl: value.webSocketUrl,
+        onText: onText,
+        onReconnectAttempt: (attempt) {
+          // Guard against firing after the widget is disposed (e.g. right
+          // after Stop), which would make ScaffoldMessenger.of(context) unsafe.
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)'),
+            ),
+          );
+        },
+        onReconnected: () {
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('연결이 복구되었습니다.')),
+          );
+        },
+        onPermanentFailure: (error) {
+          // Same dispose-safety as the callbacks above: this can fire minutes
+          // after Stop.
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('연결 복구 실패. 다시 시작해 주세요.')),
+          );
+          screenFlowController.reset();
+        },
+      );
+
+      if (!mounted) {
+        return;
+      }
+      texts = [];
+      setState(() {});
+    } catch (error) {
+      await _handleRtmpStartFailure(error);
+    } finally {
+      // Every exit path — early return, throw, success — releases the button.
+      _setStartingRtmp(false);
+    }
+  }
+
+  /// The first connection is awaited now, so its failure arrives here as a
+  /// throw. Leaving the session alive on the server would strand it.
+  Future<void> _handleRtmpStartFailure(Object error) async {
+    debugPrint('rtmp start failure: $error');
+    if (!mounted) {
+      return;
+    }
+    screenFlowController.reset();
+    await wsClient.close();
+
+    final session = startSessionResultController.state.value;
+    if (session != null) {
+      startSessionResultController.state = const AsyncValue.data(null);
+      try {
+        await restClient.stopSession(session.sessionId);
+      } catch (stopError) {
+        debugPrint('rtmp session stop failed: $stopError');
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('세션 시작에 실패했습니다. 다시 시도해 주세요.')),
+    );
+  }
+
+  /// Riverpod rejects provider mutations made during a widget life-cycle,
+  /// dispose included, so the reset runs one event-loop turn later. By then the
+  /// container itself may be gone (whole-app teardown), hence the guard.
+  void _resetSessionStateLater() {
+    Future(() {
+      try {
+        screenFlowController.reset();
+        startSessionResultController.state = const AsyncValue.data(null);
+      } catch (error) {
+        debugPrint('rtmp session state reset skipped: $error');
+      }
+    });
+  }
+
+  Future<void> _shutdownSession(StartSessionResponse? session) async {
+    if (session == null) {
+      // wsClient and screenFlow are single providers shared with the MIC tab.
+      // TabBarView builds the neighbour page mid-drag and disposes it if the
+      // drag is released back, so tearing them down when this tab owns nothing
+      // would kill the other tab's live session.
+      return;
+    }
+
+    await wsClient.close();
+
+    try {
+      await restClient.stopSession(session.sessionId);
+    } catch (error) {
+      debugPrint('rtmp session cleanup failed: $error');
+    }
+  }
+
   void onText(String text) {
+    if (!mounted) {
+      // Events that land after dispose have nowhere to go — drop them.
+      return;
+    }
     print(text);
     texts.add(text);
     textToSpeechService.enqueue(text, language: _targetLanguage.ttsLocale);
@@ -63,6 +242,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
           content: Text('${_targetLanguage.label} 음성을 지원하지 않아 영어 음성으로 재생합니다.'),
         ),
       );
+    }
+    if (!mounted) {
+      return;
     }
     setState(() {});
   }
@@ -156,86 +338,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed:
-                    asyncRtmpResult.isLoading
-                        ? null
-                        : () async {
-                          ref.read(inputStateProvider.notifier).state =
-                              InputState.rtmp;
-
-                          await ref
-                              .read(restClientProvider)
-                              .startSession(
-                                ref,
-                                sourceLang: sourceLangCode,
-                                targetLang: targetLangCode,
-                              );
-
-                          ref.read(screenFlowProvider.notifier).start();
-
-                          print(ref.read(inputStateProvider.notifier).state);
-
-                          final value =
-                              ref.read(startSessionResultProvider).value;
-                          if (value == null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('create session failed'),
-                              ),
-                            );
-                            return;
-                          }
-
-                          await ref
-                              .read(wsClientProvider)
-                              .connectWithRetry(
-                                sessionId: value.sessionId,
-                                webSocketUrl: value.webSocketUrl,
-                                onText: onText,
-                                onReconnectAttempt: (attempt) {
-                                  // Guard against firing after the widget is
-                                  // disposed (e.g. right after Stop), which
-                                  // would make ScaffoldMessenger.of(context)
-                                  // unsafe. Matches mic tab pattern.
-                                  if (!mounted) {
-                                    return;
-                                  }
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)',
-                                      ),
-                                    ),
-                                  );
-                                },
-                                onReconnected: () {
-                                  if (!mounted) {
-                                    return;
-                                  }
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('연결이 복구되었습니다.'),
-                                    ),
-                                  );
-                                },
-                                onPermanentFailure: (error) {
-                                  // Same dispose-safety as the callbacks above:
-                                  // this can fire minutes after Stop.
-                                  if (!mounted) {
-                                    return;
-                                  }
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('연결 복구 실패. 다시 시작해 주세요.'),
-                                    ),
-                                  );
-                                  ref.read(screenFlowProvider.notifier).reset();
-                                },
-                              );
-
-                          texts = [];
-                          setState(() {});
-                        },
+                onPressed: (asyncRtmpResult.isLoading || _isStartingRtmp)
+                    ? null
+                    : _handleRtmpStart,
                 child: const Text('Start'),
               ),
             ),
@@ -271,20 +376,30 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () async {
-                  ref.read(screenFlowProvider.notifier).reset();
+                  final session = startSessionResultController.state.value;
+
+                  screenFlowController.reset();
 
                   // Disable reconnect (_shouldReconnect=false) before the
                   // server closes the result socket, so the server-initiated
                   // close is treated as a manual shutdown instead of an
                   // unexpected disconnect (no "reconnecting" toast).
-                  await ref.read(wsClientProvider).close();
+                  await wsClient.close();
 
-                  final value = ref.read(startSessionResultProvider).value;
-                  if (value != null) {
-                    await ref
-                        .read(restClientProvider)
-                        .stopSession(ref, value.sessionId);
+                  if (session != null) {
+                    // An offline stop used to throw straight out of onPressed
+                    // as an uncaught async error, and the stale session then
+                    // got stopped a second time from dispose().
+                    try {
+                      await restClient.stopSession(session.sessionId);
+                    } catch (error) {
+                      debugPrint('rtmp session stop failed: $error');
+                    }
                   }
+
+                  startSessionResultController.state = const AsyncValue.data(
+                    null,
+                  );
                 },
                 child: const Text('Stop'),
               ),

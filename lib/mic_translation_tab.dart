@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/language_option.dart';
+import 'package:mvp/mic_client.dart';
 import 'package:mvp/mic_server_tts_service.dart';
+import 'package:mvp/node_ws_client.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/mic_client_provider.dart';
 import 'package:mvp/provider/mic_result_provider.dart';
@@ -33,6 +36,15 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       targetLangCode = englishTargetLanguage.translationCode;
   late final AudioCaptureService audioCapture;
   late final MicServerTtsService micTtsService;
+  // Cached in initState so teardown never needs `ref` after dispose: the
+  // providers are plain (non-autoDispose) Providers, so the instances are the
+  // same ones ref.read would hand back.
+  late final WsClient wsClient;
+  late final NodeWsClient nodeWs;
+  late final MicClient micClient;
+  late final StateController<AsyncValue<StartSessionResponse?>>
+  micResultController;
+  late final ScreenFlowController screenFlowController;
   List<String> texts = <String>[];
   bool _isStartingMic = false;
 
@@ -43,14 +55,40 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   void initState() {
     audioCapture = widget.audioCapture;
     micTtsService = widget.micTtsService;
+    wsClient = ref.read(wsClientProvider);
+    nodeWs = ref.read(nodeWsClientProvider);
+    micClient = ref.read(micClientProvider);
+    micResultController = ref.read(micResultProvider.notifier);
+    screenFlowController = ref.read(screenFlowProvider.notifier);
     _initAudioCapture();
     super.initState();
   }
 
   @override
   void dispose() {
-    _disposeCapture();
+    // Swiping to the other tab disposes this State. `ref` is already unsafe
+    // here (Riverpod throws once the widget is deactivated), so dispose talks
+    // only to the notifiers cached in initState.
+    final session = micResultController.state.value;
+    if (session != null) {
+      _resetSessionStateLater();
+    }
+    unawaited(_shutdownSession(session));
     super.dispose();
+  }
+
+  /// Riverpod rejects provider mutations made during a widget life-cycle,
+  /// dispose included, so the reset runs one event-loop turn later. By then the
+  /// container itself may be gone (whole-app teardown), hence the guard.
+  void _resetSessionStateLater() {
+    Future(() {
+      try {
+        screenFlowController.reset();
+        micResultController.state = const AsyncValue.data(null);
+      } catch (error) {
+        debugPrint('mic session state reset skipped: $error');
+      }
+    });
   }
 
   void _initAudioCapture() async {
@@ -59,22 +97,52 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
 
   Future<void> _disposeCapture() async {
     await audioCapture.stopCapture();
-    await ref.read(nodeWsClientProvider).close();
+    await nodeWs.close();
     await micTtsService.stop();
   }
 
-  Future<void> _cleanupMicSession(StartSessionResponse? session) async {
-    await ref.read(wsClientProvider).close();
-    await _disposeCapture();
+  /// Closes capture resources opened after dispose() already ran. Failures are
+  /// swallowed: there is no UI left to report them to.
+  Future<void> _abandonCapture() async {
+    try {
+      await audioCapture.stopCapture();
+      await nodeWs.close();
+    } catch (error) {
+      debugPrint('mic capture abandon failed: $error');
+    }
+  }
 
+  Future<void> _shutdownSession(StartSessionResponse? session) async {
     if (session == null) {
+      // wsClient and screenFlow are single providers shared with the URL tab.
+      // TabBarView builds the neighbour page mid-drag and disposes it if the
+      // drag is released back, so tearing them down when this tab owns nothing
+      // would kill the other tab's live session.
       return;
     }
 
+    await wsClient.close();
+    await _disposeCapture();
+
     try {
-      await ref.read(micClientProvider).stopSession(ref, session.sessionId);
+      await micClient.stopSession(session.sessionId);
     } catch (error) {
       debugPrint('mic session cleanup failed: $error');
+    }
+  }
+
+  /// Stops a session that was issued after dispose() already captured state,
+  /// so nobody else owns it. Reads the controller directly (never `ref`).
+  Future<void> _stopOrphanSession() async {
+    final orphan = micResultController.state.value;
+    if (orphan == null) {
+      return;
+    }
+    micResultController.state = const AsyncValue.data(null);
+    try {
+      await micClient.stopSession(orphan.sessionId);
+    } catch (error) {
+      debugPrint('orphan mic session stop failed: $error');
     }
   }
 
@@ -83,9 +151,13 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     Object? error,
     String? snackBarMessage,
   }) async {
+    if (!mounted) {
+      // dispose() owns the teardown once we are unmounted.
+      return;
+    }
     debugPrint('mic start failure: $error');
     ref.read(screenFlowProvider.notifier).reset();
-    await _cleanupMicSession(session);
+    await _shutdownSession(session);
 
     if (!mounted || snackBarMessage == null) {
       return;
@@ -106,6 +178,10 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   }
 
   void onText(String text) {
+    if (!mounted) {
+      // Events that land after dispose have nowhere to go — drop them.
+      return;
+    }
     print(text);
     texts.add(text);
     unawaited(micTtsService.enqueue(text, language: _targetLanguage.ttsLocale));
@@ -124,6 +200,9 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
           content: Text('${_targetLanguage.label} 음성을 지원하지 않아 영어 음성으로 재생합니다.'),
         ),
       );
+    }
+    if (!mounted) {
+      return;
     }
     setState(() {});
   }
@@ -207,19 +286,22 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                             ref.read(inputStateProvider.notifier).state =
                                 InputState.mic;
 
-                            await ref
-                                .read(micClientProvider)
-                                .startMic(
-                                  ref,
-                                  sourceLang: sourceLangCode,
-                                  targetLang: targetLangCode,
-                                );
+                            await micClient.startMic(
+                              ref,
+                              sourceLang: sourceLangCode,
+                              targetLang: targetLangCode,
+                            );
 
-                            session = ref.read(micResultProvider).value;
+                            if (!mounted) {
+                              // dispose() ran while the POST was in flight, so
+                              // it captured no session. Stop the one that just
+                              // arrived, otherwise it lives on as a zombie.
+                              await _stopOrphanSession();
+                              return;
+                            }
+
+                            session = micResultController.state.value;
                             if (session == null) {
-                              if (!mounted) {
-                                return;
-                              }
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text('create session failed'),
@@ -228,69 +310,84 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                               return;
                             }
 
-                            await ref
-                                .read(nodeWsClientProvider)
-                                .connect(sessionId: session.sessionId);
+                            await nodeWs.connect(sessionId: session.sessionId);
+                            if (!mounted) {
+                              // dispose() tore down whatever existed when it
+                              // ran; anything opened after that has to be
+                              // closed here or the mic stays hot forever.
+                              await _abandonCapture();
+                              return;
+                            }
 
-                            await audioCapture.startCapture(
-                              ref.read(nodeWsClientProvider).send,
-                            );
+                            await audioCapture.startCapture(nodeWs.send);
+                            if (!mounted) {
+                              await _abandonCapture();
+                              return;
+                            }
 
-                            await ref
-                                .read(wsClientProvider)
-                                .connectWithRetry(
-                                  sessionId: session.sessionId,
-                                  webSocketUrl: session.webSocketUrl,
-                                  onText: onText,
-                                  onReconnectAttempt: (attempt) {
-                                    if (!mounted) {
-                                      return;
-                                    }
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)',
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                  onReconnected: () {
-                                    if (!mounted) {
-                                      return;
-                                    }
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('연결이 복구되었습니다.'),
-                                      ),
-                                    );
-                                  },
-                                  onPermanentFailure: (error) {
-                                    unawaited(
-                                      _handleMicStartFailure(
-                                        session,
-                                        error: error,
-                                        snackBarMessage:
-                                            '연결 복구 실패. 다시 시작해 주세요.',
-                                      ),
-                                    );
-                                  },
-                                );
-
+                            // Flip the screen before the socket work, matching
+                            // the URL tab: connectWithRetry throwing must land
+                            // in catch, not overwrite the failure state.
                             ref.read(screenFlowProvider.notifier).start();
 
+                            await wsClient.connectWithRetry(
+                              sessionId: session.sessionId,
+                              webSocketUrl: session.webSocketUrl,
+                              onText: onText,
+                              onReconnectAttempt: (attempt) {
+                                if (!mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)',
+                                    ),
+                                  ),
+                                );
+                              },
+                              onReconnected: () {
+                                if (!mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('연결이 복구되었습니다.'),
+                                  ),
+                                );
+                              },
+                              onPermanentFailure: (error) {
+                                if (!mounted) {
+                                  return;
+                                }
+                                unawaited(
+                                  _handleMicStartFailure(
+                                    session,
+                                    error: error,
+                                    snackBarMessage: '연결 복구 실패. 다시 시작해 주세요.',
+                                  ),
+                                );
+                              },
+                            );
+
+                            if (!mounted) {
+                              return;
+                            }
+
                             texts = [];
-                            setState(() {
-                              _isStartingMic = false;
-                            });
+                            setState(() {});
 
                             print(ref.read(inputStateProvider.notifier).state);
                           } catch (error) {
-                            _setStartingMic(false);
                             await _handleMicStartFailure(
                               session,
                               error: error,
                               snackBarMessage: '마이크 시작에 실패했습니다. 다시 시도해 주세요.',
                             );
+                          } finally {
+                            // Every exit path — early return, throw, success —
+                            // releases the button here.
+                            _setStartingMic(false);
                           }
                         },
                 child:
@@ -352,22 +449,29 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () async {
+                  final session = micResultController.state.value;
+
                   ref.read(screenFlowProvider.notifier).reset();
 
                   // Disable reconnect (_shouldReconnect=false) before the
                   // server closes the result socket, so the server-initiated
                   // close is treated as a manual shutdown instead of an
                   // unexpected disconnect (no "reconnecting" toast).
-                  await ref.read(wsClientProvider).close();
+                  await wsClient.close();
 
-                  final value = ref.read(micResultProvider).value;
-                  if (value != null) {
-                    await ref
-                        .read(micClientProvider)
-                        .stopSession(ref, value.sessionId);
+                  // Local resources go before the remote call: an offline stop
+                  // used to throw here and leave the mic capturing forever.
+                  await _disposeCapture();
+
+                  if (session != null) {
+                    try {
+                      await micClient.stopSession(session.sessionId);
+                    } catch (error) {
+                      debugPrint('mic session stop failed: $error');
+                    }
                   }
 
-                  _disposeCapture();
+                  micResultController.state = const AsyncValue.data(null);
                 },
                 child: const Text('Stop'),
               ),
