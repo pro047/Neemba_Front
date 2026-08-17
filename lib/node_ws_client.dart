@@ -36,6 +36,16 @@ class NodeWsClientStats {
   }
 }
 
+/// The server tears a mic session down this long after the uplink drops
+/// (`DEFAULT_TEARDOWN_GRACE_MS`, services/node micWebSocket.ts). Past it the
+/// session is gone, and reconnecting only looks like it worked: the handshake
+/// is accepted with no validation and the socket dies on the first audio frame.
+const Duration kMicTeardownGrace = Duration(seconds: 10);
+
+/// What the server closes an uplink with once its runtime is gone
+/// ("No active mic runtime"). Confirmation that the session is unrecoverable.
+const int kMicNoRuntimeCloseCode = 1011;
+
 class NodeWsClient {
   WebSocket? _webSocket;
   final String _baseHttpUrl;
@@ -55,6 +65,9 @@ class NodeWsClient {
   int _reconnectAttempts = 0;
   int _reconnectSuccesses = 0;
   DateTime? _connectedAt;
+  DateTime? _disconnectedAt;
+  void Function(Object reason)? _onSessionLost;
+  bool _sessionLostReported = false;
 
   NodeWsClient(this._baseHttpUrl, this._micWebSocketUrl);
 
@@ -94,7 +107,17 @@ class NodeWsClient {
     );
   }
 
-  Future<void> connect({required String sessionId}) async {
+  Duration? _offlineDuration() {
+    final since = _disconnectedAt;
+    return since == null ? null : DateTime.now().difference(since);
+  }
+
+  Future<void> connect({
+    required String sessionId,
+    void Function(Object reason)? onSessionLost,
+  }) async {
+    _onSessionLost = onSessionLost;
+    _sessionLostReported = false;
     if (_sessionId != sessionId) {
       _resetStats(sessionId);
     }
@@ -127,6 +150,8 @@ class NodeWsClient {
     _connectedUri = uri;
     _webSocket = socket;
     _connectedAt = DateTime.now();
+    // The outage is over; the next one starts its own clock.
+    _disconnectedAt = null;
 
     if (_reconnectAttempts > 0) {
       _reconnectSuccesses += 1;
@@ -137,17 +162,17 @@ class NodeWsClient {
     socket.listen(
       (_) {},
       onDone: () {
-        if (identical(_webSocket, socket)) {
-          _webSocket = null;
+        _handleSocketGone(socket);
+        if (socket.closeCode == kMicNoRuntimeCloseCode) {
+          // The server already discarded this session's runtime; retrying just
+          // burns battery and buffers audio nobody will ever translate.
+          _reportSessionLost('server closed uplink with ${socket.closeCode}');
+          return;
         }
-        _connectedAt = null;
         _scheduleReconnect();
       },
       onError: (_) {
-        if (identical(_webSocket, socket)) {
-          _webSocket = null;
-        }
-        _connectedAt = null;
+        _handleSocketGone(socket);
         _scheduleReconnect();
       },
       cancelOnError: true,
@@ -205,6 +230,28 @@ class NodeWsClient {
     }
   }
 
+  void _handleSocketGone(WebSocket socket) {
+    if (identical(_webSocket, socket)) {
+      _webSocket = null;
+    }
+    _connectedAt = null;
+    // Only the first drop of an outage starts the clock — later failed
+    // attempts must not keep pushing the deadline out.
+    _disconnectedAt ??= DateTime.now();
+  }
+
+  void _reportSessionLost(Object reason) {
+    if (_sessionLostReported) {
+      return;
+    }
+    _sessionLostReported = true;
+    _manualClose = true;
+    debugPrint('mic websocket session lost: $reason ${stats.toString()}');
+    _pendingFrames.clear();
+    _pendingBytes = 0;
+    _onSessionLost?.call(reason);
+  }
+
   void _scheduleReconnect() {
     if (_manualClose || _reconnectScheduled) {
       return;
@@ -235,6 +282,18 @@ class NodeWsClient {
         break;
       }
 
+      // Checked before connecting, not after: past the grace the server has
+      // already dropped the session, and a "successful" connect here would be
+      // a lie that only surfaces on the next audio frame.
+      final offlineFor = _offlineDuration();
+      if (offlineFor != null && offlineFor > kMicTeardownGrace) {
+        _reportSessionLost(
+          'uplink down ${offlineFor.inSeconds}s, past the '
+          '${kMicTeardownGrace.inSeconds}s server grace',
+        );
+        break;
+      }
+
       try {
         await _connectInternal(sessionId);
         break;
@@ -248,6 +307,8 @@ class NodeWsClient {
 
   Future<void> close() async {
     _manualClose = true;
+    _onSessionLost = null;
+    _disconnectedAt = null;
     _sessionId = null;
     _connectedUri = null;
     _pendingFrames.clear();

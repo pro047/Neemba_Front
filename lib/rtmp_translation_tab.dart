@@ -112,6 +112,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
         sessionId: value.sessionId,
         webSocketUrl: value.webSocketUrl,
         onText: onText,
+        maxRetries: kWsMaxRetriesRtmp,
         onReconnectAttempt: (attempt) {
           // Guard against firing after the widget is disposed (e.g. right
           // after Stop), which would make ScaffoldMessenger.of(context) unsafe.
@@ -120,7 +121,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
           }
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)'),
+              content: Text(
+                '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetriesRtmp)',
+              ),
             ),
           );
         },
@@ -380,10 +383,8 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
 
                   screenFlowController.reset();
 
-                  // Disable reconnect (_shouldReconnect=false) before the
-                  // server closes the result socket, so the server-initiated
-                  // close is treated as a manual shutdown instead of an
-                  // unexpected disconnect (no "reconnecting" toast).
+                  // Synchronous, so no "연결 끊김" toast fires during teardown.
+                  wsClient.stopReconnecting();
                   await wsClient.close();
 
                   if (session != null) {

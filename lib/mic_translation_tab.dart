@@ -121,8 +121,12 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       return;
     }
 
-    await wsClient.close();
+    // Order matters: silence the retry loop synchronously, release local
+    // hardware, and only then touch sockets and the server. Anything that can
+    // block on the network must sit behind the microphone being released.
+    wsClient.stopReconnecting();
     await _disposeCapture();
+    await wsClient.close();
 
     try {
       await micClient.stopSession(session.sessionId);
@@ -310,7 +314,22 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                               return;
                             }
 
-                            await nodeWs.connect(sessionId: session.sessionId);
+                            await nodeWs.connect(
+                              sessionId: session.sessionId,
+                              onSessionLost: (reason) {
+                                // The server dropped the session while the
+                                // uplink was away. Everything downstream is
+                                // dead, so tear down instead of recording into
+                                // a void.
+                                unawaited(
+                                  _handleMicStartFailure(
+                                    session,
+                                    error: reason,
+                                    snackBarMessage: '세션이 종료되었습니다. 다시 시작해 주세요.',
+                                  ),
+                                );
+                              },
+                            );
                             if (!mounted) {
                               // dispose() tore down whatever existed when it
                               // ran; anything opened after that has to be
@@ -334,6 +353,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                               sessionId: session.sessionId,
                               webSocketUrl: session.webSocketUrl,
                               onText: onText,
+                              maxRetries: kWsMaxRetriesMic,
                               onReconnectAttempt: (attempt) {
                                 if (!mounted) {
                                   return;
@@ -341,7 +361,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                      '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetries)',
+                                      '연결 끊김. 재연결 시도 중... ($attempt/$kWsMaxRetriesMic)',
                                     ),
                                   ),
                                 );
@@ -453,15 +473,15 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
 
                   ref.read(screenFlowProvider.notifier).reset();
 
-                  // Disable reconnect (_shouldReconnect=false) before the
-                  // server closes the result socket, so the server-initiated
-                  // close is treated as a manual shutdown instead of an
-                  // unexpected disconnect (no "reconnecting" toast).
-                  await wsClient.close();
+                  // Synchronous, so no "연결 끊김" toast can fire once the
+                  // server sees the uplink go away.
+                  wsClient.stopReconnecting();
 
-                  // Local resources go before the remote call: an offline stop
-                  // used to throw here and leave the mic capturing forever.
+                  // Local resources first: closing a socket that never
+                  // finished its handshake used to hang here forever, and the
+                  // microphone stayed hot behind it.
                   await _disposeCapture();
+                  await wsClient.close();
 
                   if (session != null) {
                     try {

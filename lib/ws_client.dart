@@ -3,16 +3,42 @@ import 'dart:async';
 
 import 'package:web_socket_channel/io.dart';
 
-/// §4-4-3: ws 재시도 예산. 서버(WebSocketHub)는 끊김 후 5분(300s) 동안
-/// pending 큐를 유지하며 재접속을 기다리는데, 기존 maxRetries 2(≈3초 포기)는
-/// 그 예산과 어긋나 큐 방류 기회를 버렸다(2026-07-19 장애 결함 4).
-/// 1s 지수 백오프 + 30s 상한으로 12회 ≈ 241s — 서버 대기 안에서 끝까지 버틴다.
-const int kWsMaxRetries = 12;
+/// ws 재시도 예산.
+///
+/// 이전 주석은 "서버가 끊김 후 300초 동안 pending 큐를 유지한다"를 근거로 12회를
+/// 잡았으나, 그 백로그는 멀티 청취자 작업(D3/P1)에서 제거됐다(서버 확인,
+/// 2026-08-17). 지금 서버에는 다운링크 유지 창도 시간 기반 만료도 없고, 세션은
+/// POST /internal/sessions/stop 으로만 끝난다. 따라서 "창 안에 복귀"라는 목표는
+/// 존재하지 않으며, 재시도 횟수는 순수하게 "사용자를 얼마나 기다리게 할 것인가"다.
+///
+/// 진짜 종료 신호는 close code다 — [kWsSessionNotFound] 참조.
 const Duration kWsMaxBackoff = Duration(seconds: 30);
+
+/// MIC 세션은 업링크가 수명을 지배한다. 업링크가 서버 유예(10초)를 넘겨 끊기면
+/// 세션이 통째로 사라지므로, 다운링크를 몇 분씩 붙잡아봐야 살릴 세션이 없다.
+/// 1·2·4·8·16·30 = 61초면 순수 다운링크 순단을 덮기에 충분하다.
+const int kWsMaxRetriesMic = 6;
+
+/// URL(RTMP) 세션에는 앱이 유지하는 업링크가 없어 세션이 스스로 죽지 않는다.
+/// 1·2·4·8·16·30×7 ≈ 241초까지 버틴다.
+const int kWsMaxRetriesRtmp = 12;
+
+/// 라이브가 아닌 세션에 붙었을 때 서버가 보내는 close code
+/// (`CLOSE_SESSION_NOT_FOUND`, services/python websocket.py). 이걸 받으면
+/// 세션이 이미 끝난 것이므로 재시도는 무의미하다.
+///
+/// 주의: 서버가 teardown 하면서 기존 소켓을 닫을 때는 1000(정상 종료)으로
+/// 나간다. 그래서 4404는 재접속을 시도해야만 볼 수 있고, 1000을 받았다고
+/// 곧바로 포기하면 진짜 순단과 구분하지 못한다.
+const int kWsSessionNotFound = 4404;
 
 /// A black-holed TCP connect never completes on its own, so the handshake gets
 /// its own deadline; without it a single attempt can hang the whole retry loop.
 const Duration kWsConnectTimeout = Duration(seconds: 10);
+
+/// Teardown deadline. Local cleanup must never wait on a socket longer than a
+/// user is willing to hold a dead Stop button.
+const Duration kWsCloseTimeout = Duration(seconds: 3);
 
 /// Backoff for the [attempt]-th retry (1-based): initial * 2^(attempt-1),
 /// clamped to [max]. Uncapped doubling would reach ~34min by retry 12 — the
@@ -89,19 +115,48 @@ class WsClient {
     );
   }
 
-  Future<void> close() async {
+  /// Stops the retry loop without touching the socket. Callers that are about
+  /// to tear down local resources use this first: it is synchronous, so no
+  /// "연결 끊김" toast can fire while the teardown runs.
+  void stopReconnecting() {
     _shouldReconnect = false;
     _currentRetry = 0;
-    await _subscription?.cancel();
-    await _channel?.sink.close();
+  }
+
+  /// Releases the channel. Closing one that never finished its handshake never
+  /// completes — the sink waits on a socket that will never exist — so both
+  /// awaits are bounded. A stuck close here froze Stop and left the mic
+  /// recording, because every teardown path runs through this method.
+  Future<void> _discardChannel() async {
+    final subscription = _subscription;
+    final channel = _channel;
+    _subscription = null;
     _channel = null;
+
+    try {
+      await subscription?.cancel().timeout(kWsCloseTimeout);
+    } catch (error) {
+      print('ws subscription cancel failed: $error');
+    }
+    try {
+      await channel?.sink.close().timeout(kWsCloseTimeout);
+    } catch (error) {
+      print('ws channel close failed: $error');
+    }
+  }
+
+  Future<void> close() async {
+    stopReconnecting();
+    await _discardChannel();
   }
 
   Future<void> connectWithRetry({
     required String sessionId,
     required String webSocketUrl,
     required void Function(String) onText,
-    int maxRetries = kWsMaxRetries,
+    // No default: MIC and URL sessions die by different rules, so the caller
+    // has to state which budget applies rather than inherit the wrong one.
+    required int maxRetries,
     Duration initialBackoff = const Duration(seconds: 1),
     Duration maxBackoff = kWsMaxBackoff,
     void Function(int attempt)? onReconnectAttempt,
@@ -122,8 +177,9 @@ class WsClient {
       print(
         'webSocket url (session $sessionId, retry #$_currentRetry): $url',
       );
-      await _subscription?.cancel();
-      await _channel?.sink.close();
+      // The previous attempt's channel may have died mid-handshake; discarding
+      // it must not stall the retry that is trying to replace it.
+      await _discardChannel();
       _channel = IOWebSocketChannel.connect(
         url,
         headers: _headers,
@@ -143,6 +199,7 @@ class WsClient {
           },
         onDone: () => unawaited(
           _handleDisconnect(
+            closeCode: _channel?.closeCode,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
             maxBackoff: maxBackoff,
@@ -155,6 +212,7 @@ class WsClient {
         onError: (e) => unawaited(
           _handleDisconnect(
             error: e,
+            closeCode: _channel?.closeCode,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
             maxBackoff: maxBackoff,
@@ -185,6 +243,7 @@ class WsClient {
         unawaited(
           _handleDisconnect(
             error: e,
+            closeCode: _channel?.closeCode,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
             maxBackoff: maxBackoff,
@@ -204,6 +263,7 @@ class WsClient {
 
   Future<void> _handleDisconnect({
     Object? error,
+    int? closeCode,
     required int maxRetries,
     required Duration initialBackoff,
     required Duration maxBackoff,
@@ -217,7 +277,16 @@ class WsClient {
       return;
     }
 
-    print('ws disconnected: $error');
+    print('ws disconnected: $error (close code $closeCode)');
+
+    if (closeCode == kWsSessionNotFound) {
+      // The server says this session is not live. Nothing to come back to, so
+      // stop here instead of spending the rest of the budget on a dead id.
+      print('ws session gone (close code $closeCode) — giving up');
+      _shouldReconnect = false;
+      onPermanentFailure?.call(error ?? 'session not found');
+      return;
+    }
 
     if (wsShouldRetry(_currentRetry, maxRetries)) {
       _currentRetry += 1;
