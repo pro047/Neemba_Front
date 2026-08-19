@@ -78,11 +78,19 @@ fi
 #
 # 읽기 전용으로 복사한다. 프롬프트가 "읽기만" 이라고 말하는 것과 별개로,
 # acceptEdits 로 도는 에이전트를 상대로는 파일 권한이 유일하게 확실한 제약이다.
+#
+# 반입 조건은 "worktree 기준으로 git 이 무시하는 파일" 이다. 무시되지 않으면
+# 범위 게이트가 이 파일을 "설계에 없는 변경" 으로 잡아 파이프라인을 죽인다 —
+# 메인의 .gitignore 수정이 아직 커밋되지 않았으면 실제로 그렇게 된다.
 for f in HANDOFF.json HANDOFF-ARCHIVE.json; do
-  if [ -f "$MAIN/$f" ]; then
+  [ -f "$MAIN/$f" ] || continue
+  if git -C "$WT" check-ignore -q "$f"; then
     cp "$MAIN/$f" "$WT/$f"
     chmod 444 "$WT/$f"
     log "근거 자료 반입: $f (읽기 전용)"
+  else
+    log "⚠ $f 는 worktree 의 .gitignore 에 없어 반입하지 않는다"
+    log "  (반입하면 범위 게이트가 미추적 파일로 보고 죽인다 — .gitignore 커밋이 먼저다)"
   fi
 done
 
