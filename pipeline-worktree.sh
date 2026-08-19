@@ -36,9 +36,15 @@ if [ -n "$(git -C "$MAIN" status --porcelain)" ]; then
   log "  옮기려면 (추적 중인 파일만):"
   log "    git -C '$MAIN' diff > /tmp/wip-$FEATURE.patch"
   log "    git -C '$WT' apply /tmp/wip-$FEATURE.patch"
-  printf '  이대로 계속? (y/N) ' >&2
-  read -r ans < /dev/tty
-  case "$ans" in y|Y) ;; *) log "중단"; exit 1 ;; esac
+  if [ "${WT_YES:-0}" = "1" ]; then
+    log "  (WT_YES=1 — 확인 없이 계속)"
+  else
+    printf '  이대로 계속? (y/N) ' >&2
+    # tty 가 없으면(백그라운드·CI) read 가 rc=1 로 끝나고 set -e 가 그 자리에서
+    # exit 1 을 낸다. 없는 tty 는 "y 를 누르지 않았다"와 같은 뜻이므로 n 으로 떨군다.
+    read -r ans < /dev/tty || ans=n
+    case "$ans" in y|Y) ;; *) log "중단"; exit 1 ;; esac
+  fi
 fi
 
 # ── worktree 생성 ────────────────────────────────────
@@ -64,6 +70,21 @@ if [ -f "$SRC_DESIGN" ] \
   cp "$SRC_DESIGN" "$WT/.pipeline/$FEATURE/DESIGN.md"
   log "기존 DESIGN.md 이어받음 → 설계 단계는 건너뛴다 (새로 뽑으려면 FRESH_DESIGN=1)"
 fi
+
+# ── gitignore 된 근거 자료 반입 ──────────────────────
+# HANDOFF.json 은 .gitignore 대상(서버 취약점·기기 식별자 포함, 원격이 공개라 로컬 전용)이라
+# worktree 에 따라오지 않는다. 그런데 design/judge/impl 프롬프트가 이걸 근거 자료로 읽는다 —
+# 없으면 설계가 근거 없이 돌고, 그 사실이 산출물에는 드러나지 않는다.
+#
+# 읽기 전용으로 복사한다. 프롬프트가 "읽기만" 이라고 말하는 것과 별개로,
+# acceptEdits 로 도는 에이전트를 상대로는 파일 권한이 유일하게 확실한 제약이다.
+for f in HANDOFF.json HANDOFF-ARCHIVE.json; do
+  if [ -f "$MAIN/$f" ]; then
+    cp "$MAIN/$f" "$WT/$f"
+    chmod 444 "$WT/$f"
+    log "근거 자료 반입: $f (읽기 전용)"
+  fi
+done
 
 # ── Flutter 의존성 ───────────────────────────────────
 # .dart_tool/ 은 gitignore 라 worktree 에 따라오지 않는다.
