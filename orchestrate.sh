@@ -37,12 +37,15 @@ TEST_CMD="${TEST_CMD:-flutter analyze && flutter test}"
 # FALLBACK_* 은 가용성 폴백(529 과부하 등) 전용이다.
 # 안전 분류기에 의한 모델 교체는 이걸로 막을 수 없다 — MODEL_LOG.md 로 감시한다.
 MODEL_DESIGN="${MODEL_DESIGN:-claude-fable-5}"
+# 판단 검증은 설계를 반박하는 일이라 verify 와 같은 적대적 추론이다. 상위 모델.
+MODEL_JUDGE="${MODEL_JUDGE:-claude-fable-5}"
 MODEL_IMPL="${MODEL_IMPL:-claude-sonnet-5}"
 MODEL_VERIFY="${MODEL_VERIFY:-claude-fable-5}"
 
 # 폴백은 티어를 내리지 않는다. 구현 주 모델이 이미 중간 티어라 아래로 갈 곳이 없고,
 # 과부하 때 하위 티어로 떨어뜨리면 산출물 품질이 조용히 무너진다 — 그래서 위로 올린다.
 FALLBACK_DESIGN="${FALLBACK_DESIGN:-claude-opus-5,claude-sonnet-5}"
+FALLBACK_JUDGE="${FALLBACK_JUDGE:-claude-opus-5,claude-sonnet-5}"
 FALLBACK_IMPL="${FALLBACK_IMPL:-claude-opus-5}"
 FALLBACK_VERIFY="${FALLBACK_VERIFY:-claude-opus-5,claude-sonnet-5}"
 
@@ -53,10 +56,12 @@ FALLBACK_VERIFY="${FALLBACK_VERIFY:-claude-opus-5,claude-sonnet-5}"
 # 실질 브레이크는 예산이다. 턴 상한은 무한루프 탈출용으로만 둔다 —
 # 턴으로 조이면 "일은 잘 하는데 상한에 걸려 죽는" 낭비가 생긴다.
 TURNS_DESIGN="${TURNS_DESIGN:-40}"
+TURNS_JUDGE="${TURNS_JUDGE:-40}"
 TURNS_IMPL="${TURNS_IMPL:-80}"
 TURNS_VERIFY="${TURNS_VERIFY:-40}"
 
 BUDGET_DESIGN="${BUDGET_DESIGN:-5}"
+BUDGET_JUDGE="${BUDGET_JUDGE:-5}"
 BUDGET_IMPL="${BUDGET_IMPL:-8}"
 BUDGET_VERIFY="${BUDGET_VERIFY:-5}"
 
@@ -212,8 +217,11 @@ run_stage() {
 # ─────────────────────────────────────────── 사람 게이트
 # 상담역은 여기에 손댈 수 없다. 오직 사람만 누른다.
 gate_human() {
-  local msg=$1 file=$2
-  [ "$AUTO" = "1" ] && { log "  (AUTO=1 — 게이트 통과: $msg)"; return 0; }
+  # force=1 이면 AUTO=1(무인)이어도 반드시 멈춘다. 판단 검증이 뭔가를 걸었을 때처럼
+  # "사람이 봐야만 하는" 게이트에 쓴다.
+  local msg=$1 file=$2 force=${3:-0}
+  [ "$AUTO" = "1" ] && [ "$force" != "1" ] \
+    && { log "  (AUTO=1 — 게이트 통과: $msg)"; return 0; }
 
   state "GATE" "$msg"
   cat >&2 <<EOF
@@ -225,10 +233,15 @@ $(printf '\033[1;33m[게이트]\033[0m') $msg
   y = 진행   e = 열어보기   n = 중단
 EOF
   printf '  > ' >&2
-  local ans; read -r ans < /dev/tty
+  # `|| ans=n` 은 tty 가 없을 때(cron·백그라운드·CI)를 위한 것이다. 이 스크립트는
+  # set -e 로 돌기 때문에 /dev/tty 를 못 열면 read 가 rc=1 로 끝나 그 자리에서
+  # exit 1 이 된다 — case 도 die 도 타지 않아 호출자가 "게이트에서 막힘"을
+  # 다른 실패와 구분할 수 없다. 없는 tty 는 "사람이 y 를 누르지 않았다"와 같은
+  # 뜻이므로 중단(n)으로 떨어뜨려 의도한 die 경로를 타게 한다.
+  local ans; read -r ans < /dev/tty || ans=n
   case "$ans" in
     y|Y) return 0 ;;
-    e|E) "${EDITOR:-less}" "$file"; gate_human "$msg" "$file" ;;
+    e|E) "${EDITOR:-less}" "$file"; gate_human "$msg" "$file" "$force" ;;
     *)   die "사람이 중단함" ;;
   esac
 }
@@ -293,6 +306,38 @@ if [ "$FRESH_DESIGN" != "1" ] && [ -f "$WORK/DESIGN.md" ] \
 else
   run_stage design "$MODEL_DESIGN" "$FALLBACK_DESIGN" "$PROMPTS/design.md" "$WORK/DESIGN.md"
 fi
+# ─────────────────────────────────────────── 판단 검증
+# 설계의 '주장'을 별 프로세스가 감사한다. 구현물에는 테스트·게이트가 있는데
+# 판단물(원인 판정·우선순위·"X 가 없다")은 아무 검사 없이 구현으로 흘러갔다.
+# DESIGN.md 보다 새로우면 재사용한다 — 설계가 새로 돌면 판정도 다시 받아야 한다.
+if [ -f "$WORK/JUDGE.md" ] && [ "$WORK/JUDGE.md" -nt "$WORK/DESIGN.md" ] \
+   && [ "$(grep -m1 '^STATUS:' "$WORK/JUDGE.md" | awk '{print $2}')" = "DONE" ]; then
+  log "↺ 기존 JUDGE.md 재사용 (DESIGN.md 보다 최신)"
+  state "REUSED:judge" "기존 산출물 재사용"
+else
+  run_stage judge "$MODEL_JUDGE" "$FALLBACK_JUDGE" "$PROMPTS/judge.md" "$WORK/JUDGE.md"
+fi
+
+# 판단 검증은 읽기 전용 단계다 — 확인용 임시 파일을 만들었다면 지웠어야 한다.
+gate_scope judge
+
+# ★ 판정권은 셸에 있다. 에이전트가 쓴 '판정' 문장을 읽지 않고, 자기가 신고한
+#   카운트 한 줄만 파싱한다. 형식이 없으면 그것도 게이트 위반이다.
+JUDGE_COUNTS="$(grep -m1 -E '^UNVERIFIED: *[0-9]+ +REFUTED: *[0-9]+' "$WORK/JUDGE.md" || true)"
+[ -n "$JUDGE_COUNTS" ] \
+  || die "judge: JUDGE.md 에 'UNVERIFIED: <n> REFUTED: <n>' 라인이 없다 → $WORK/JUDGE.md"
+UNVERIFIED="$(sed -E 's/^UNVERIFIED: *([0-9]+).*/\1/' <<<"$JUDGE_COUNTS")"
+REFUTED="$(sed -E 's/.*REFUTED: *([0-9]+).*/\1/' <<<"$JUDGE_COUNTS")"
+log "판단 검증: 미확인 ${UNVERIFIED} / 반박 ${REFUTED}"
+
+if [ "$UNVERIFIED" -gt 0 ] || [ "$REFUTED" -gt 0 ]; then
+  state "JUDGE_FLAGGED" "미확인 $UNVERIFIED / 반박 $REFUTED"
+  # force=1 — 무인 실행이어도 여기서는 반드시 사람을 부른다.
+  gate_human \
+    "설계의 주장 중 반박 ${REFUTED}건·미확인 ${UNVERIFIED}건 — 이대로 구현하면 그 위에 코드가 쌓인다" \
+    "$WORK/JUDGE.md" 1
+fi
+
 gate_human "설계 검토 — 여기서 틀리면 뒤가 전부 낭비다" "$WORK/DESIGN.md"
 
 while :; do

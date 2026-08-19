@@ -176,14 +176,16 @@ setup
 env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
 d="$(cat .pipeline/feat/DESIGN.args 2>/dev/null)"
 i="$(cat .pipeline/feat/IMPL.args   2>/dev/null)"
+j="$(cat .pipeline/feat/JUDGE.args  2>/dev/null)"
 v="$(cat .pipeline/feat/VERIFY.args 2>/dev/null)"
 if [ "$d" = "model=claude-fable-5 turns=40 budget=5" ] \
+   && [ "$j" = "model=claude-fable-5 turns=40 budget=5" ] \
    && [ "$i" = "model=claude-sonnet-5 turns=80 budget=8" ] \
    && [ "$v" = "model=claude-fable-5 turns=40 budget=5" ]; then
   green "  PASS  설계/검증=fable 40턴, 구현=소넷 80턴 이 각각 전달된다"; PASS=$((PASS+1))
 else
   red   "  FAIL  상한 전달 어긋남"
-  printf '         design: %s\n         impl  : %s\n         verify: %s\n' "$d" "$i" "$v"
+  printf '         design: %s\n         judge : %s\n         impl  : %s\n         verify: %s\n' "$d" "$j" "$i" "$v"
   FAIL=$((FAIL+1))
 fi
 teardown
@@ -196,6 +198,32 @@ if grep -q 'turns=7 budget=2' .pipeline/feat/IMPL.args 2>/dev/null; then
 else
   red   "  FAIL  상한 오버라이드가 안 먹음 — $(cat .pipeline/feat/IMPL.args 2>/dev/null)"
   FAIL=$((FAIL+1))
+fi
+teardown
+
+echo
+echo "=== 판단 검증 게이트 ==="
+# 판정권은 셸에 있다 — 에이전트가 신고한 카운트 한 줄만 파싱한다.
+# 그 줄이 없으면 "판정 없음"이 아니라 "형식 위반"으로 죽어야 한다.
+expect "카운트 라인이 없으면 죽는다"            2 -- FAKE_SCENARIO=ok FAKE_JUDGE_COUNTS=no
+# 반박·미확인이 하나라도 있으면 AUTO=1(무인)이어도 사람을 부른다.
+# 테스트 환경엔 tty 가 없으므로 read 가 n 으로 떨어져 die(2) 가 정답이다.
+expect "반박이 있으면 무인 실행도 멈춘다"       2 -- FAKE_SCENARIO=ok FAKE_REFUTED=2
+expect "미확인이 있어도 무인 실행이 멈춘다"     2 -- FAKE_SCENARIO=ok FAKE_UNVERIFIED=1
+expect "반박·미확인이 0 이면 그냥 지나간다"     0 -- FAKE_SCENARIO=ok
+
+# judge 프롬프트는 출력(JUDGE.md)을 먼저, 입력(DESIGN.md)을 나중에 말한다.
+# 산출물 경로를 뒤에서 잡으면 설계 문서를 덮어쓴다 — 실제로 밟았던 실패 모드다.
+setup
+mkdir -p .pipeline/feat
+printf 'STATUS: DONE\n\n(사람이 이미 검토한 설계)\n\nALLOWED_FILES:\n- x.txt\n\n' > .pipeline/feat/DESIGN.md
+env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
+if grep -q '사람이 이미 검토한 설계' .pipeline/feat/DESIGN.md \
+   && [ -f .pipeline/feat/JUDGE.md ] \
+   && grep -q '^UNVERIFIED: 0 REFUTED: 0' .pipeline/feat/JUDGE.md; then
+  green "  PASS  판단 검증이 설계 문서를 덮어쓰지 않는다"; PASS=$((PASS+1))
+else
+  red   "  FAIL  DESIGN.md 가 훼손됐거나 JUDGE.md 가 안 나옴"; FAIL=$((FAIL+1))
 fi
 teardown
 

@@ -32,9 +32,15 @@ done
 PROMPT="$(cat)"
 
 # ── 프롬프트에서 산출물 경로와 단계 이름 추출
-# 주의: 프롬프트는 입력 파일(DESIGN.md 등)을 먼저 언급하고 산출물을 나중에 말한다.
-#       따라서 head 가 아니라 tail 을 잡아야 한다.
-ARTIFACT="$(grep -o '[^ `]*\.pipeline/[^ `]*/[A-Z]*\.md' <<<"$PROMPT" | tail -1)"
+# "## 출력" 섹션 안의 첫 경로를 잡는다.
+# 예전 방식(전체에서 tail -1)은 judge 단계에서 깨진다 — judge 프롬프트는
+# 출력(JUDGE.md)을 먼저 말하고 입력(DESIGN.md)을 나중에 말하기 때문에
+# tail 이 DESIGN.md 를 집어서 설계 문서를 덮어쓴다.
+ARTIFACT="$(sed -n '/^## 출력/,/^## /p' <<<"$PROMPT" \
+  | grep -o '[^ `]*\.pipeline/[^ `]*/[A-Z]*\.md' | head -1)"
+# 출력 섹션이 없는 프롬프트를 위한 폴백
+[ -n "$ARTIFACT" ] \
+  || ARTIFACT="$(grep -o '[^ `]*\.pipeline/[^ `]*/[A-Z]*\.md' <<<"$PROMPT" | tail -1)"
 STAGE="$(basename "${ARTIFACT:-UNKNOWN.md}" .md)"   # DESIGN / IMPL / VERIFY
 
 # ── 시나리오 결정 (단계별 > 전역 > 기본)
@@ -65,7 +71,13 @@ write_artifact() {  # write_artifact <status-block>
   [ -n "$ARTIFACT" ] || return 0
   mkdir -p "$(dirname "$ARTIFACT")"
   {
-    printf '%s\n' "$1"; echo; echo "(fake $STAGE 산출물 — 시나리오 $SC)"
+    printf '%s\n' "$1"
+    # 판단 검증은 STATUS 바로 다음 줄에 기계가 읽는 카운트를 낸다.
+    # FAKE_JUDGE_COUNTS=no 면 그 줄을 빼서 "형식 위반" 을 흉내낸다.
+    if [ "$STAGE" = "JUDGE" ] && [ "${FAKE_JUDGE_COUNTS:-yes}" != "no" ]; then
+      echo "UNVERIFIED: ${FAKE_UNVERIFIED:-0} REFUTED: ${FAKE_REFUTED:-0}"
+    fi
+    echo; echo "(fake $STAGE 산출물 — 시나리오 $SC)"
     # 설계 단계는 범위 계약도 낸다. 이게 없으면 gate_scope 가 죽인다 —
     # 진짜 실행과 같은 조건이어야 나머지 케이스가 게이트를 실제로 통과한 게 된다.
     if [ "$STAGE" = "DESIGN" ]; then
