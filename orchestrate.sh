@@ -37,14 +37,51 @@ TEST_CMD="${TEST_CMD:-flutter analyze && flutter test}"
 # FALLBACK_* 은 가용성 폴백(529 과부하 등) 전용이다.
 # 안전 분류기에 의한 모델 교체는 이걸로 막을 수 없다 — MODEL_LOG.md 로 감시한다.
 MODEL_DESIGN="${MODEL_DESIGN:-claude-fable-5}"
-MODEL_IMPL="${MODEL_IMPL:-claude-opus-5}"
+MODEL_IMPL="${MODEL_IMPL:-claude-sonnet-5}"
 MODEL_VERIFY="${MODEL_VERIFY:-claude-fable-5}"
 
+# 폴백은 티어를 내리지 않는다. 구현 주 모델이 이미 중간 티어라 아래로 갈 곳이 없고,
+# 과부하 때 하위 티어로 떨어뜨리면 산출물 품질이 조용히 무너진다 — 그래서 위로 올린다.
 FALLBACK_DESIGN="${FALLBACK_DESIGN:-claude-opus-5,claude-sonnet-5}"
-FALLBACK_IMPL="${FALLBACK_IMPL:-claude-sonnet-5}"
+FALLBACK_IMPL="${FALLBACK_IMPL:-claude-opus-5}"
 FALLBACK_VERIFY="${FALLBACK_VERIFY:-claude-opus-5,claude-sonnet-5}"
 
+# ── 단계별 상한 ──────────────────────────────────────
+# 턴 상한은 모델 티어와 같이 움직인다. 티어를 내리면 시행착오가 늘어 턴을 더 먹는다.
+# 실측: opus-5 구현이 41턴에서 error_max_turns 로 죽었다 (2026-08-17, p0-fixes)
+#
+# 실질 브레이크는 예산이다. 턴 상한은 무한루프 탈출용으로만 둔다 —
+# 턴으로 조이면 "일은 잘 하는데 상한에 걸려 죽는" 낭비가 생긴다.
+TURNS_DESIGN="${TURNS_DESIGN:-40}"
+TURNS_IMPL="${TURNS_IMPL:-80}"
+TURNS_VERIFY="${TURNS_VERIFY:-40}"
+
+BUDGET_DESIGN="${BUDGET_DESIGN:-5}"
+BUDGET_IMPL="${BUDGET_IMPL:-8}"
+BUDGET_VERIFY="${BUDGET_VERIFY:-5}"
+
 MODEL_LOG=""   # WORK 확정 후 아래에서 설정
+
+# ── worktree 격리 강제 ───────────────────────────────
+# 각 단계는 --permission-mode acceptEdits 로 돈다. 메인 체크아웃에서 돌리면
+# 사람이 작업 중인 파일을 에이전트가 그대로 덮어쓴다. 규칙으로 부탁하지 않고 막는다.
+#
+# 판별: worktree 안에서는 git-dir 이 <main>/.git/worktrees/<name>,
+#       git-common-dir 은 <main>/.git 을 가리킨다. 메인 체크아웃에서는 둘이 같다.
+#
+# die() 를 안 쓴다 — 아직 아무 단계도 안 돌았는데 STATE.md 에 DIED 를 남기면
+# 상담역이 "돌다가 죽었다"로 읽는다. 시작 자체를 거부한 것과는 다른 사건이다.
+REQUIRE_WORKTREE="${REQUIRE_WORKTREE:-1}"
+if [ "$REQUIRE_WORKTREE" = "1" ] \
+   && [ "$(git -C "$ROOT" rev-parse --git-dir)" = "$(git -C "$ROOT" rev-parse --git-common-dir)" ]; then
+  {
+    printf '\033[1;31m[FAIL]\033[0m 메인 체크아웃에서는 돌리지 않는다\n'
+    printf '  acceptEdits 로 도는 에이전트가 작업 중인 파일을 덮어쓴다.\n\n'
+    printf '  worktree 만들기:      ./pipeline-worktree.sh %s\n' "$FEATURE"
+    printf '  정말 여기서 돌리려면: REQUIRE_WORKTREE=0 ./orchestrate.sh %s\n' "$FEATURE"
+  } >&2
+  exit 2
+fi
 
 mkdir -p "$WORK"
 FAIL_LOG="$WORK/FAIL_LOG.md"     # append-only
@@ -91,8 +128,15 @@ run_stage() {
   local name=$1 model=$2 fallback=$3 prompt_file=$4 artifact=$5
   local out="$WORK/$name.result.json" stream="$WORK/$name.stream.jsonl" code=0
 
+  # 상한은 단계 이름으로 끌어온다: name=impl → TURNS_IMPL / BUDGET_IMPL
+  # 인자로 더 받지 않는 이유 — 이미 5개다. 7개짜리 위치 인자는 호출부에서 순서를 틀리게 된다.
+  local upper turns_var budget_var turns budget
+  upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+  turns_var="TURNS_$upper"; budget_var="BUDGET_$upper"
+  turns="${!turns_var:-40}"; budget="${!budget_var:-5}"
+
   state "RUNNING:$name" "model=$model"
-  log "▶ $name (model=$model, fallback=$fallback)"
+  log "▶ $name (model=$model, fallback=$fallback, 턴≤$turns, 예산≤\$$budget)"
 
   set +e
   envsubst < "$prompt_file" | claude -p \
@@ -100,8 +144,8 @@ run_stage() {
     --fallback-model "$fallback" \
     --output-format stream-json \
     --verbose \
-    --max-turns 40 \
-    --max-budget-usd 5 \
+    --max-turns "$turns" \
+    --max-budget-usd "$budget" \
     --permission-mode acceptEdits \
     --append-system-prompt "$(cat "$PROMPTS/_contract.md")" \
     | tee "$stream" \
@@ -189,6 +233,53 @@ EOF
   esac
 }
 
+# ─────────────────────────────────────────── 범위 게이트
+# 에이전트가 설계에 없는 파일을 건드렸는지 git 에게 묻는다.
+#
+# 실측 근거: p0-fixes 1차 실행에서 설계가 "변경하지 않는다"고 명시한
+# node_ws_client.dart 를 구현 단계가 77줄 고쳤다 (2026-08-17).
+# impl.md 에는 그때도 "목록에 없는 파일은 BLOCKED" 라고 적혀 있었다 —
+# 프롬프트로 부탁한 규칙은 지켜지지 않는다. 그래서 셸이 확인한다.
+#
+# 판정 근거는 DESIGN.md 의 ALLOWED_FILES 블록 하나뿐이다.
+# 사람이 읽는 표를 파싱하지 않는 이유: 형식이 흔들리고, 흔들리는 걸 파싱하면
+# 게이트가 조용히 통과시킨다. 계약은 기계가 읽을 수 있는 모양이어야 한다.
+gate_scope() {
+  local stage=$1
+  local allowed="$WORK/allowed_files.txt" changed="$WORK/changed_files.txt"
+
+  # grep 은 매치가 0건이면 exit 1 이다. set -e 아래에서 그건 "계약이 비었다"가 아니라
+  # "스크립트 사망"으로 나타난다 — 게이트가 판정하기 전에 죽으므로 반드시 감싼다.
+  set +e
+  sed -n '/^ALLOWED_FILES:/,/^[[:space:]]*$/p' "$WORK/DESIGN.md" \
+    | grep '^- ' | sed -e 's/^- *//' -e 's|^\./||' | sort -u > "$allowed"
+
+  # cut -c4- : git status --porcelain 은 앞 3칸이 상태코드+공백이다.
+  # .pipeline/ 은 산출물이라 항상 제외한다 (.gitignore 가 지워져도 게이트는 살아 있어야 한다)
+  git -C "$ROOT" status --porcelain \
+    | cut -c4- | sed 's|^\./||' | grep -v '^\.pipeline/' | sort -u > "$changed"
+  set -e
+
+  [ -s "$allowed" ] \
+    || die "$stage: DESIGN.md 에 ALLOWED_FILES 블록이 없다 — 범위를 계약으로 만들 수 없다 (prompts/design.md 참조)"
+
+  local strays count
+  strays="$(comm -13 "$allowed" "$changed")"
+  if [ -n "$strays" ]; then
+    count=$(printf '%s\n' "$strays" | wc -l | tr -d ' ')
+    log "⚠ $stage: 설계에 없는 파일이 변경됐다 (${count}개)"
+    printf '%s\n' "$strays" | sed 's/^/     /' >&2
+    {
+      echo "## scope creep ($stage) — $(date -Iseconds)"
+      printf '%s\n' "$strays"
+      echo
+    } >> "$FAIL_LOG"
+    die "$stage: 범위 이탈 ${count}개 → $FAIL_LOG"
+  fi
+
+  log "  ✔ $stage 범위 준수 (계약 $(wc -l < "$allowed" | tr -d ' ')개 파일)"
+}
+
 # ─────────────────────────────────────────── 파이프라인
 ATTEMPT=0
 state "START"
@@ -209,7 +300,9 @@ while :; do
   log "── 시도 $ATTEMPT/$((MAX_RETRY + 1))"
 
   run_stage impl   "$MODEL_IMPL"   "$FALLBACK_IMPL"   "$PROMPTS/impl.md"   "$WORK/IMPL.md"
+  gate_scope impl
   run_stage verify "$MODEL_VERIFY" "$FALLBACK_VERIFY" "$PROMPTS/verify.md" "$WORK/VERIFY.md"
+  gate_scope verify
 
   # ★ 최종 판정은 셸이 한다. 에이전트에게 안 맡긴다.
   state "TESTING" "$TEST_CMD"

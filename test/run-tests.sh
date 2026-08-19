@@ -26,8 +26,13 @@ setup() {
   cp "$SRC/prompts/"*.md prompts/
   cp "$HERE/fake-claude" test/claude       # ← 이름이 'claude' 여야 가로챈다
   chmod +x orchestrate.sh test/claude
+  printf '.pipeline/\n' > .gitignore
   echo x > x.txt; git add -A; git commit -qm init
   export PATH="$SANDBOX/test:$PATH"
+  # 샌드박스는 worktree 가 아닌 평범한 저장소다. 격리 가드를 켠 채로 두면
+  # 나머지 케이스가 전부 "가드에 막혀 exit 2" 로 통과해버린다 —
+  # 통과하지만 아무것도 검증하지 않는 상태가 되므로 여기서 끈다.
+  export REQUIRE_WORKTREE=0
 }
 
 teardown() { cd /; rm -rf "$SANDBOX"; }
@@ -81,7 +86,7 @@ echo "=== 설계 재사용 ==="
 # 이미 DONE 인 DESIGN.md 가 있으면 설계 단계를 아예 호출하지 않아야 한다
 setup
 mkdir -p .pipeline/feat
-printf 'STATUS: DONE\n\n(사람이 이미 검토한 설계)\n' > .pipeline/feat/DESIGN.md
+printf 'STATUS: DONE\n\n(사람이 이미 검토한 설계)\n\nALLOWED_FILES:\n- x.txt\n\n' > .pipeline/feat/DESIGN.md
 env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
 if [ ! -f .pipeline/feat/design.result.json ] \
    && grep -q '사람이 이미 검토한 설계' .pipeline/feat/DESIGN.md \
@@ -94,7 +99,7 @@ teardown
 
 setup
 mkdir -p .pipeline/feat
-printf 'STATUS: DONE\n\n(사람이 이미 검토한 설계)\n' > .pipeline/feat/DESIGN.md
+printf 'STATUS: DONE\n\n(사람이 이미 검토한 설계)\n\nALLOWED_FILES:\n- x.txt\n\n' > .pipeline/feat/DESIGN.md
 env FAKE_SCENARIO=ok AUTO=1 FRESH_DESIGN=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
 if [ -f .pipeline/feat/design.result.json ]; then
   green "  PASS  FRESH_DESIGN=1 이면 설계를 다시 뽑는다"; PASS=$((PASS+1))
@@ -139,6 +144,79 @@ if grep -q 'phase: DONE' .pipeline/feat/STATE.md 2>/dev/null; then
   green "  PASS  STATE.md 가 최종 상태를 반영한다"; PASS=$((PASS+1))
 else
   red   "  FAIL  STATE.md 미갱신"; FAIL=$((FAIL+1))
+fi
+teardown
+
+echo
+echo "=== worktree 격리 강제 ==="
+# acceptEdits 로 도는 파이프라인이 메인 체크아웃을 덮어쓰는 것을 막는 가드.
+# 확인할 것은 두 방향이다 — 메인에서 막는가, 그리고 worktree 에서는 통과시키는가.
+# 앞만 테스트하면 "언제나 막는" 가드도 통과한다.
+expect "메인 체크아웃이면 시작 자체를 거부한다" 2 -- FAKE_SCENARIO=ok REQUIRE_WORKTREE=1
+
+setup
+WT="$SANDBOX-wt"
+git worktree add -b pipeline/feat "$WT" HEAD >/dev/null 2>&1
+got=0
+(cd "$WT" && env FAKE_SCENARIO=ok AUTO=1 REQUIRE_WORKTREE=1 TEST_CMD="true" \
+  ./orchestrate.sh feat) >/dev/null 2>&1 || got=$?
+if [ "$got" -eq 0 ] && [ -f "$WT/.pipeline/feat/IMPL.md" ]; then
+  green "  PASS  worktree 안에서는 가드를 켜도 완주한다"; PASS=$((PASS+1))
+else
+  red   "  FAIL  worktree 판별 실패 — exit=$got (기대 0)"; FAIL=$((FAIL+1))
+fi
+git worktree remove --force "$WT" >/dev/null 2>&1 || rm -rf "$WT"
+teardown
+
+echo
+echo "=== 단계별 상한 ==="
+# 모델과 턴/예산 상한이 단계마다 다르게 전달되는지. 여기가 어긋나면
+# "구현만 소넷 80턴" 이라는 결정이 조용히 무효가 된다.
+setup
+env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
+d="$(cat .pipeline/feat/DESIGN.args 2>/dev/null)"
+i="$(cat .pipeline/feat/IMPL.args   2>/dev/null)"
+v="$(cat .pipeline/feat/VERIFY.args 2>/dev/null)"
+if [ "$d" = "model=claude-fable-5 turns=40 budget=5" ] \
+   && [ "$i" = "model=claude-sonnet-5 turns=80 budget=8" ] \
+   && [ "$v" = "model=claude-fable-5 turns=40 budget=5" ]; then
+  green "  PASS  설계/검증=fable 40턴, 구현=소넷 80턴 이 각각 전달된다"; PASS=$((PASS+1))
+else
+  red   "  FAIL  상한 전달 어긋남"
+  printf '         design: %s\n         impl  : %s\n         verify: %s\n' "$d" "$i" "$v"
+  FAIL=$((FAIL+1))
+fi
+teardown
+
+setup
+env FAKE_SCENARIO=ok AUTO=1 TURNS_IMPL=7 BUDGET_IMPL=2 TEST_CMD="true" \
+  ./orchestrate.sh feat >/dev/null 2>&1
+if grep -q 'turns=7 budget=2' .pipeline/feat/IMPL.args 2>/dev/null; then
+  green "  PASS  TURNS_IMPL/BUDGET_IMPL 환경변수가 기본값을 덮는다"; PASS=$((PASS+1))
+else
+  red   "  FAIL  상한 오버라이드가 안 먹음 — $(cat .pipeline/feat/IMPL.args 2>/dev/null)"
+  FAIL=$((FAIL+1))
+fi
+teardown
+
+echo
+echo "=== 범위 이탈 게이트 ==="
+# 확인할 것은 두 방향이다 — 이탈을 잡는가, 그리고 계약 안이면 통과시키는가.
+# 앞만 보면 "언제나 죽이는" 게이트도 PASS 로 보인다.
+expect "구현이 계약에 없는 파일을 만들면 죽는다" 2 -- FAKE_SCENARIO=scope_creep
+expect "계약 안에서만 움직이면 완주한다"         0 -- FAKE_SCENARIO=ok
+
+# 계약 블록 자체가 없는 옛 설계를 재사용하면 죽어야 한다.
+# 파싱 결과가 비었을 때 "이탈 0개"로 읽고 통과시키는 게 이런 게이트의 단골 버그다.
+setup
+mkdir -p .pipeline/feat
+printf 'STATUS: DONE\n\n(ALLOWED_FILES 블록이 없는 옛 설계)\n' > .pipeline/feat/DESIGN.md
+got=0
+env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1 || got=$?
+if [ "$got" -eq 2 ]; then
+  green "  PASS  계약 블록 없는 설계는 통과시키지 않는다"; PASS=$((PASS+1))
+else
+  red   "  FAIL  계약이 없는데 완주함 — exit=$got (기대 2)"; FAIL=$((FAIL+1))
 fi
 teardown
 

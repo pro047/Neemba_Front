@@ -12,16 +12,19 @@
 #   crash         프로세스가 0이 아닌 코드로 죽음
 #   model_swap    다른 모델이 돌았다고 보고
 #   impl_fail     구현은 되는데 테스트가 깨지는 코드를 씀
+#   scope_creep   설계 ALLOWED_FILES 에 없는 파일을 건드림
 #
 # 단계별로 다르게 하려면 FAKE_SCENARIO_<STAGE> 를 쓴다. 예: FAKE_SCENARIO_IMPL=no_status
 
 set -uo pipefail
 
-# ── 인자에서 --model 뽑기
-MODEL="unknown"
+# ── 인자에서 --model / 상한 뽑기
+MODEL="unknown"; TURNS="?"; BUDGET="?"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model) MODEL="$2"; shift 2 ;;
+    --model)          MODEL="$2";  shift 2 ;;
+    --max-turns)      TURNS="$2";  shift 2 ;;
+    --max-budget-usd) BUDGET="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -38,6 +41,16 @@ STAGE="$(basename "${ARTIFACT:-UNKNOWN.md}" .md)"   # DESIGN / IMPL / VERIFY
 var="FAKE_SCENARIO_${STAGE}"
 SC="${!var:-${FAKE_SCENARIO:-ok}}"
 
+# ── 받은 인자를 남긴다
+# 단계마다 다른 모델·상한이 실제로 전달되는지 테스트가 확인할 근거.
+# 스트림 이벤트에 싣지 않는 이유: crash 시나리오는 아무 이벤트도 안 내는데,
+# 그때도 "무엇을 받고 죽었는지"는 남아야 한다.
+if [ -n "$ARTIFACT" ]; then
+  mkdir -p "$(dirname "$ARTIFACT")"
+  printf 'model=%s turns=%s budget=%s\n' "$MODEL" "$TURNS" "$BUDGET" \
+    > "$(dirname "$ARTIFACT")/$STAGE.args"
+fi
+
 emit() {  # emit <is_error> <reported_model>
   # stream-json 은 NDJSON 이다 — 한 줄에 이벤트 하나.
   # 진행 표시가 뽑아 쓰는 assistant 이벤트를 먼저 흘리고, 마지막에 result 를 낸다.
@@ -51,7 +64,17 @@ EOF
 write_artifact() {  # write_artifact <status-block>
   [ -n "$ARTIFACT" ] || return 0
   mkdir -p "$(dirname "$ARTIFACT")"
-  { printf '%s\n' "$1"; echo; echo "(fake $STAGE 산출물 — 시나리오 $SC)"; } > "$ARTIFACT"
+  {
+    printf '%s\n' "$1"; echo; echo "(fake $STAGE 산출물 — 시나리오 $SC)"
+    # 설계 단계는 범위 계약도 낸다. 이게 없으면 gate_scope 가 죽인다 —
+    # 진짜 실행과 같은 조건이어야 나머지 케이스가 게이트를 실제로 통과한 게 된다.
+    if [ "$STAGE" = "DESIGN" ]; then
+      echo
+      echo "ALLOWED_FILES:"
+      for f in ${FAKE_ALLOWED:-x.txt}; do echo "- $f"; done
+      echo
+    fi
+  } > "$ARTIFACT"
 }
 
 case "$SC" in
@@ -82,6 +105,12 @@ BLOCKED_NEEDS: JWT 인지 세션 쿠키인지 결정 필요"
   model_swap)
     write_artifact "STATUS: DONE"
     emit false "claude-opus-4-8" ;;   # 요청과 다른 모델이 돈 상황
+
+  scope_creep)
+    write_artifact "STATUS: DONE"
+    # 구현이 계약에 없는 파일을 만든다 — p0-fixes 1차 실행에서 실제로 일어난 일
+    [ "$STAGE" = "IMPL" ] && echo "설계에 없던 파일" > "${ROOT:-.}/stray.dart"
+    emit false "$MODEL" ;;
 
   impl_fail)
     write_artifact "STATUS: DONE"
