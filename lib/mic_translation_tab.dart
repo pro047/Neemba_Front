@@ -48,6 +48,10 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   late final ScreenFlowController screenFlowController;
   List<String> texts = <String>[];
   bool _isStartingMic = false;
+  late final ScrollController _scrollController;
+  // Starts true so the first subtitles follow; _handleScroll turns it off as
+  // soon as the user scrolls up to read back.
+  bool _shouldAutoScroll = true;
 
   TargetLanguageOption get _targetLanguage =>
       targetLanguageOptionForCode(targetLangCode);
@@ -61,6 +65,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     micClient = ref.read(micClientProvider);
     micResultController = ref.read(micResultProvider.notifier);
     screenFlowController = ref.read(screenFlowProvider.notifier);
+    _scrollController = ScrollController()..addListener(_handleScroll);
     _initAudioCapture();
     super.initState();
   }
@@ -75,6 +80,8 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       _resetSessionStateLater();
     }
     unawaited(_shutdownSession(session));
+    _scrollController.removeListener(_handleScroll);
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -191,6 +198,30 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     texts.add(text);
     unawaited(micTtsService.enqueue(text, language: _targetLanguage.ttsLocale));
     setState(() {});
+    _scrollToBottomIfNeeded();
+  }
+
+  void _scrollToBottomIfNeeded() {
+    if (!_shouldAutoScroll) return;
+    // The new item does not exist in the viewport until this frame is laid
+    // out, so maxScrollExtent is only correct afterwards.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final threshold = 48.0;
+    final isNearBottom =
+        position.pixels >= position.maxScrollExtent - threshold;
+    _shouldAutoScroll = isNearBottom;
   }
 
   void handleTap(int index) async {
@@ -502,6 +533,10 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
               child: ElevatedButton(
                 onPressed: () {
                   texts = [];
+                  // Clearing is a fresh start. Without this, a user who had
+                  // scrolled up stays opted out of auto-scroll on an empty
+                  // list, with nothing on screen to hint why.
+                  _shouldAutoScroll = true;
                   unawaited(micTtsService.stop());
                   setState(() {});
                 },
@@ -522,6 +557,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
               // measured on every frame, so the cost grew with the transcript;
               // this builds only what is on screen. Same box, same scrolling.
               child: ListView.builder(
+                controller: _scrollController,
                 itemCount: texts.length,
                 itemBuilder:
                     (context, index) => ListTile(
