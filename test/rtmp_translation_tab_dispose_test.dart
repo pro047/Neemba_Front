@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:mvp/api_config.dart';
@@ -19,6 +22,27 @@ class _FakeRestClient extends RestClient {
   _FakeRestClient(super.config);
 
   final List<String> stoppedSessions = <String>[];
+
+  /// Held open to keep startSession in flight, standing in for the POST. The
+  /// window between "Start pressed" and "session assigned" is where a tab
+  /// swipe used to strand the session on the server.
+  Completer<void>? startGate;
+
+  @override
+  Future<void> startSession(
+    StateController<AsyncValue<StartSessionResponse?>> resultController, {
+    required String sourceLang,
+    required String targetLang,
+  }) async {
+    resultController.state = const AsyncLoading();
+    await startGate?.future;
+    resultController.state = AsyncValue.data(
+      StartSessionResponse(
+        sessionId: 'late-rtmp-session',
+        webSocketUrl: 'ws://127.0.0.1:1/ws',
+      ),
+    );
+  }
 
   @override
   Future<void> stopSession(String sessionId) async {
@@ -98,6 +122,34 @@ void main() {
       container.read(rtmpScreenFlowProvider).value?.status,
       ScreenState.waiting,
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Start 중 탭을 떠나면 늦게 온 세션을 정리한다', (tester) async {
+    // dispose() captured state while the POST was still in flight, so it saw
+    // AsyncLoading, read value as null and owned nothing. Without the orphan
+    // stop the session the server just created is stranded, and the provider
+    // keeps an id that the next Start silently overwrites — after which
+    // nothing can stop it. The MIC tab has had this guard; the URL tab did not.
+    restClient.startGate = Completer<void>();
+    final container = await mountTab(tester);
+
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Start'));
+    await tester.pump();
+    expect(container.read(startSessionResultProvider).isLoading, isTrue);
+
+    await swipeAway(tester);
+
+    // The POST lands after the tab is gone.
+    restClient.startGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(
+      restClient.stoppedSessions,
+      ['late-rtmp-session'],
+      reason: '정리하지 않으면 서버에 좀비 세션으로 남는다',
+    );
+    expect(container.read(startSessionResultProvider).value, isNull);
     expect(tester.takeException(), isNull);
   });
 }

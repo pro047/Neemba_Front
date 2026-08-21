@@ -86,13 +86,19 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       ref.read(inputStateProvider.notifier).state = InputState.rtmp;
 
       await restClient.startSession(
-        ref,
+        // The controller, not `ref`: this await can outlive the widget when
+        // the tab is swiped.
+        startSessionResultController,
         sourceLang: sourceLangCode,
         targetLang: targetLangCode,
       );
 
       if (!mounted) {
-        // dispose() owns the teardown from here on.
+        // dispose() does NOT own this one. It captured state while the POST
+        // was still in flight, saw AsyncLoading (value null) and returned
+        // early, so the session that just arrived belongs to nobody — stop it
+        // here or it is stranded on the server with no id left to stop it by.
+        await _stopOrphanSession();
         return;
       }
 
@@ -159,6 +165,22 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     } finally {
       // Every exit path — early return, throw, success — releases the button.
       _setStartingRtmp(false);
+    }
+  }
+
+  /// Stops a session that arrived after dispose() already captured state, so
+  /// nobody else owns it. Reads the controller directly (never `ref`), which is
+  /// the whole reason startSession takes a controller.
+  Future<void> _stopOrphanSession() async {
+    final orphan = startSessionResultController.state.value;
+    if (orphan == null) {
+      return;
+    }
+    startSessionResultController.state = const AsyncValue.data(null);
+    try {
+      await restClient.stopSession(orphan.sessionId);
+    } catch (error) {
+      logD('orphan rtmp session stop failed: $error');
     }
   }
 

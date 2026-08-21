@@ -1,10 +1,10 @@
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
 import 'package:mvp/log.dart';
-import 'package:mvp/provider/mic_result_provider.dart';
 import 'package:mvp/type.dart';
 
 class MicClient {
@@ -28,13 +28,18 @@ class MicClient {
     }
   }
 
+  /// Takes the controller, not a `WidgetRef`, for the same reason [stopSession]
+  /// takes neither: the POST outlives the widget. A tab swipe during the ~3s
+  /// call disposes the State, and a Ref used after that throws — which left the
+  /// result stuck on AsyncLoading (permanent "Starting…") and stranded the
+  /// session the server had just created. A controller stays valid.
   Future<void> startMic(
-    WidgetRef ref, {
+    StateController<AsyncValue<StartSessionResponse?>> resultController, {
     required String sourceLang,
     required String targetLang,
   }) async {
     try {
-      ref.read(micResultProvider.notifier).state = const AsyncLoading();
+      resultController.state = const AsyncLoading();
       final url = Uri.parse('${config.httpUrl}/api/mic/start');
       logD(
         'Start button (mic) -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
@@ -56,7 +61,7 @@ class MicClient {
         return StartSessionResponse.fromJson(data);
       });
       logD('result $result');
-      ref.read(micResultProvider.notifier).state = result;
+      resultController.state = result;
     } catch (err) {
       logD('start err : $err');
       throw Exception('start error');

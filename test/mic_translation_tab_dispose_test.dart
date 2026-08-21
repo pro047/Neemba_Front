@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_audio_capture/flutter_audio_capture.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mvp/api_config.dart';
 import 'package:mvp/audio_capture_service.dart';
@@ -20,6 +23,27 @@ class _FakeMicClient extends MicClient {
 
   final List<String> stoppedSessions = <String>[];
   bool throwOnStop = false;
+
+  /// Held open to keep startMic in flight, standing in for the ~3s POST. The
+  /// window between "Start pressed" and "session assigned" is where a tab
+  /// swipe used to strand the app.
+  Completer<void>? startGate;
+
+  @override
+  Future<void> startMic(
+    StateController<AsyncValue<StartSessionResponse?>> resultController, {
+    required String sourceLang,
+    required String targetLang,
+  }) async {
+    resultController.state = const AsyncLoading();
+    await startGate?.future;
+    resultController.state = AsyncValue.data(
+      StartSessionResponse(
+        sessionId: 'late-session',
+        webSocketUrl: 'ws://127.0.0.1:1/ws',
+      ),
+    );
+  }
 
   @override
   Future<void> stopSession(String sessionId) async {
@@ -213,6 +237,40 @@ void main() {
       ScreenState.succeed,
     );
     expect(micClient.stoppedSessions, isEmpty);
+  });
+
+  testWidgets('Starting 중 탭을 떠나도 로딩에 갇히지 않고 늦게 온 세션을 정리한다', (tester) async {
+    // The POST outlives the widget. startMic used to take a WidgetRef and
+    // assign through it after the await, which throws once the State is gone;
+    // the throw was reshaped into a generic 'start error' and swallowed by the
+    // !mounted guard, so micResult stayed AsyncLoading forever ("Starting…"
+    // with no way out but restarting the app) and the session the server had
+    // just created was never stopped.
+    micClient.startGate = Completer<void>();
+    final container = await mountTab(tester);
+
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Start'));
+    await tester.pump();
+    expect(container.read(micResultProvider).isLoading, isTrue);
+
+    await swipeAway(tester);
+
+    // The POST lands after the tab is gone.
+    micClient.startGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(micResultProvider).isLoading,
+      isFalse,
+      reason: '로딩에 갇히면 돌아왔을 때 영원히 Starting...이 된다',
+    );
+    expect(container.read(micResultProvider).value, isNull);
+    expect(
+      micClient.stoppedSessions,
+      ['late-session'],
+      reason: '늦게 도착한 세션을 정리하지 않으면 서버에 좀비로 남는다',
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('MIC 탭 dispose는 URL 탭의 화면 흐름을 건드리지 않는다', (tester) async {

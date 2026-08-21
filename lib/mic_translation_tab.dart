@@ -170,6 +170,11 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     }
     logD('mic start failure: $error');
     ref.read(micScreenFlowProvider.notifier).reset();
+    // Clear before tearing down, as the URL tab already does. The session is
+    // dead once we are here; leaving it in the provider means a later tab
+    // swipe sees session != null and runs the whole teardown a second time —
+    // a redundant stop POST against a dead id and a misleading failure log.
+    micResultController.state = const AsyncValue.data(null);
     await _shutdownSession(session);
 
     if (!mounted || snackBarMessage == null) {
@@ -324,7 +329,9 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                                 InputState.mic;
 
                             await micClient.startMic(
-                              ref,
+                              // The controller, not `ref`: this await can
+                              // outlive the widget when the tab is swiped.
+                              micResultController,
                               sourceLang: sourceLangCode,
                               targetLang: targetLangCode,
                             );
