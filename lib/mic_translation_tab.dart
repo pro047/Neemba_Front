@@ -60,11 +60,11 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
   void initState() {
     audioCapture = widget.audioCapture;
     micTtsService = widget.micTtsService;
-    wsClient = ref.read(wsClientProvider);
+    wsClient = ref.read(micWsClientProvider);
     nodeWs = ref.read(nodeWsClientProvider);
     micClient = ref.read(micClientProvider);
     micResultController = ref.read(micResultProvider.notifier);
-    screenFlowController = ref.read(screenFlowProvider.notifier);
+    screenFlowController = ref.read(micScreenFlowProvider.notifier);
     _scrollController = ScrollController()..addListener(_handleScroll);
     _initAudioCapture();
     super.initState();
@@ -122,10 +122,11 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
 
   Future<void> _shutdownSession(StartSessionResponse? session) async {
     if (session == null) {
-      // wsClient and screenFlow are single providers shared with the URL tab.
-      // TabBarView builds the neighbour page mid-drag and disposes it if the
-      // drag is released back, so tearing them down when this tab owns nothing
-      // would kill the other tab's live session.
+      // Kept after the per-tab split (P1-7) as defence, not as the fix. The
+      // providers are this tab's own now, so tearing them down can no longer
+      // reach the URL tab — but TabBarView still builds this page mid-drag and
+      // disposes it when the drag is released back, and a teardown that owns
+      // nothing has nothing to do either way.
       return;
     }
 
@@ -168,7 +169,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       return;
     }
     logD('mic start failure: $error');
-    ref.read(screenFlowProvider.notifier).reset();
+    ref.read(micScreenFlowProvider.notifier).reset();
     await _shutdownSession(session);
 
     if (!mounted || snackBarMessage == null) {
@@ -245,7 +246,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
 
   @override
   Widget build(BuildContext context) {
-    final screenState = ref.watch(screenFlowProvider);
+    final screenState = ref.watch(micScreenFlowProvider);
     final asyncMicResult = ref.watch(micResultProvider);
     final current = micTtsService.currentSpeakingIndex;
     final isStarting = _isStartingMic || asyncMicResult.isLoading;
@@ -379,7 +380,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                             // Flip the screen before the socket work, matching
                             // the URL tab: connectWithRetry throwing must land
                             // in catch, not overwrite the failure state.
-                            ref.read(screenFlowProvider.notifier).start();
+                            ref.read(micScreenFlowProvider.notifier).start();
 
                             await wsClient.connectWithRetry(
                               sessionId: session.sessionId,
@@ -503,7 +504,7 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                 onPressed: () async {
                   final session = micResultController.state.value;
 
-                  ref.read(screenFlowProvider.notifier).reset();
+                  ref.read(micScreenFlowProvider.notifier).reset();
 
                   // Synchronous, so no "연결 끊김" toast can fire once the
                   // server sees the uplink go away.

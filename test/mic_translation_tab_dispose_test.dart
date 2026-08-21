@@ -186,32 +186,58 @@ void main() {
         webSocketUrl: 'ws://127.0.0.1:1/ws',
       ),
     );
-    container.read(screenFlowProvider.notifier).start();
+    container.read(micScreenFlowProvider.notifier).start();
     await tester.pump();
 
     await swipeAway(tester);
 
     expect(
-      container.read(screenFlowProvider).value?.status,
+      container.read(micScreenFlowProvider).value?.status,
       ScreenState.waiting,
     );
   });
 
-  testWidgets('세션이 없으면 공유 화면 흐름을 건드리지 않는다', (tester) async {
-    // screenFlowProvider and wsClientProvider are shared with the URL tab.
-    // TabBarView builds the neighbour mid-drag and disposes it when the drag is
-    // released back, so a tab that owns no session must leave them alone —
-    // otherwise it tears down the other tab's live session.
+  testWidgets('세션이 없으면 자기 화면 흐름도 건드리지 않는다', (tester) async {
+    // Before P1-7 this guarded the URL tab, because the flow was one shared
+    // provider and a session-less dispose reset the neighbour's screen. The
+    // provider is this tab's own now, so the contract is narrower: a tab that
+    // owns no session has nothing to tear down, and the guard stays as defence.
     final container = await mountTab(tester);
-    container.read(screenFlowProvider.notifier).start();
+    container.read(micScreenFlowProvider.notifier).start();
     await tester.pump();
 
     await swipeAway(tester);
 
     expect(
-      container.read(screenFlowProvider).value?.status,
+      container.read(micScreenFlowProvider).value?.status,
       ScreenState.succeed,
     );
     expect(micClient.stoppedSessions, isEmpty);
+  });
+
+  testWidgets('MIC 탭 dispose는 URL 탭의 화면 흐름을 건드리지 않는다', (tester) async {
+    // This is what P1-7 actually buys, and it is the case the old shared
+    // provider got wrong (P0-2): a tab that DOES own a session tears itself
+    // down, and the neighbour's screen survives it. With one shared flow the
+    // reset below would drag the URL tab back to waiting.
+    final container = await mountTab(tester);
+    container.read(rtmpScreenFlowProvider.notifier).start();
+    container.read(micResultProvider.notifier).state = AsyncValue.data(
+      StartSessionResponse(
+        sessionId: 'session-4',
+        webSocketUrl: 'ws://127.0.0.1:1/ws',
+      ),
+    );
+    await tester.pump();
+
+    await swipeAway(tester);
+
+    // The MIC tab owned a session, so its own teardown did run...
+    expect(micClient.stoppedSessions, ['session-4']);
+    // ...and the URL tab's screen is left exactly where it was.
+    expect(
+      container.read(rtmpScreenFlowProvider).value?.status,
+      ScreenState.succeed,
+    );
   });
 }

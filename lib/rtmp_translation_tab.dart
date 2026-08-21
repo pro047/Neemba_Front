@@ -45,9 +45,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   @override
   void initState() {
     textToSpeechService = widget.service;
-    wsClient = ref.read(wsClientProvider);
+    wsClient = ref.read(rtmpWsClientProvider);
     restClient = ref.read(restClientProvider);
-    screenFlowController = ref.read(screenFlowProvider.notifier);
+    screenFlowController = ref.read(rtmpScreenFlowProvider.notifier);
     startSessionResultController = ref.read(startSessionResultProvider.notifier);
     _scrollController = ScrollController()..addListener(_handleScroll);
     super.initState();
@@ -206,10 +206,11 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
 
   Future<void> _shutdownSession(StartSessionResponse? session) async {
     if (session == null) {
-      // wsClient and screenFlow are single providers shared with the MIC tab.
-      // TabBarView builds the neighbour page mid-drag and disposes it if the
-      // drag is released back, so tearing them down when this tab owns nothing
-      // would kill the other tab's live session.
+      // Kept after the per-tab split (P1-7) as defence, not as the fix. The
+      // providers are this tab's own now, so tearing them down can no longer
+      // reach the MIC tab — but TabBarView still builds this page mid-drag and
+      // disposes it when the drag is released back, and a teardown that owns
+      // nothing has nothing to do either way.
       return;
     }
 
@@ -277,7 +278,7 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   //
   @override
   Widget build(BuildContext context) {
-    final screenState = ref.watch(screenFlowProvider);
+    final screenState = ref.watch(rtmpScreenFlowProvider);
     final asyncRtmpResult = ref.watch(startSessionResultProvider);
     final current = textToSpeechService.currentSpeakingIndex;
 

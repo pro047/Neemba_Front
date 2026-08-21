@@ -35,7 +35,20 @@ class ScreenFlowController extends AsyncNotifier<ScreenFlowState> {
   }
 }
 
-final screenFlowProvider =
+// One instance per tab. A single shared provider meant the tab that owned no
+// session still reset the other tab's screen when TabBarView disposed it
+// mid-drag (P0-2). The controller class is the same; only the ownership is
+// split, so nothing about the flow itself changes.
+//
+// Deliberately two plain providers rather than a family: flutter_riverpod is on
+// a 3.0.0-dev prerelease whose API has already produced two runtime-only traps
+// in this project, and this split does not need a dynamic key.
+final micScreenFlowProvider =
+    AsyncNotifierProvider<ScreenFlowController, ScreenFlowState>(
+      ScreenFlowController.new,
+    );
+
+final rtmpScreenFlowProvider =
     AsyncNotifierProvider<ScreenFlowController, ScreenFlowState>(
       ScreenFlowController.new,
     );

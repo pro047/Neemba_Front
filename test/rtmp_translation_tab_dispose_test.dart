@@ -95,7 +95,7 @@ void main() {
     expect(restClient.stoppedSessions, ['rtmp-1']);
     expect(container.read(startSessionResultProvider).value, isNull);
     expect(
-      container.read(screenFlowProvider).value?.status,
+      container.read(rtmpScreenFlowProvider).value?.status,
       ScreenState.waiting,
     );
     expect(tester.takeException(), isNull);
