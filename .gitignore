@@ -60,3 +60,4 @@ android/captures/
 # Session handoff notes — records unresolved server-side vulnerabilities and
 # device identifiers. This remote is public, so it stays local.
 HANDOFF.json
+HANDOFF-ARCHIVE.json
