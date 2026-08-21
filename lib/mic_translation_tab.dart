@@ -517,24 +517,20 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
               ),
               height: 400,
               width: double.infinity,
-              child: SingleChildScrollView(
-                child: Column(
-                  children: [
-                    ListView.builder(
-                      shrinkWrap: true,
-                      physics: NeverScrollableScrollPhysics(),
-                      itemCount: texts.length,
-                      itemBuilder:
-                          (context, index) => ListTile(
-                            title: Text('‣ ${texts[index]}'),
-                            trailing: Icon(
-                              current == index ? Icons.stop : Icons.play_arrow,
-                            ),
-                            onTap: () => handleTap(index),
-                          ),
+              // The list scrolls itself instead of being laid out whole inside
+              // a SingleChildScrollView. shrinkWrap forced every subtitle to be
+              // measured on every frame, so the cost grew with the transcript;
+              // this builds only what is on screen. Same box, same scrolling.
+              child: ListView.builder(
+                itemCount: texts.length,
+                itemBuilder:
+                    (context, index) => ListTile(
+                      title: Text('‣ ${texts[index]}'),
+                      trailing: Icon(
+                        current == index ? Icons.stop : Icons.play_arrow,
+                      ),
+                      onTap: () => handleTap(index),
                     ),
-                  ],
-                ),
               ),
             ),
           ],
