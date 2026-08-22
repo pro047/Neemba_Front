@@ -47,6 +47,13 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Release signing material. This remote is public and a leaked upload key can
+# only be revoked, never rotated back — these must never be committed.
+key.properties
+*.jks
+*.keystore
+*.p12
+
 # Xcode build cache (in-project DerivedData location)
 **/DerivedData/
 
