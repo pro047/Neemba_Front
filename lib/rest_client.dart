@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/api_config.dart';
 import 'package:http/http.dart' as http;
+import 'package:mvp/diagnostics.dart';
 import 'package:mvp/log.dart';
 import 'package:mvp/type.dart';
 
@@ -43,6 +44,7 @@ class RestClient {
       logD(
         'Start button -> POST $url payload={"sourceLang":"$sourceLang","targetLang":"$targetLang"}',
       );
+      final elapsed = Stopwatch()..start();
       final result = await AsyncValue.guard(() async {
         final response = await http.post(
           url,
@@ -59,6 +61,16 @@ class RestClient {
         return StartSessionResponse.fromJson(data);
       });
       logD('result $result');
+      // Same reason as MicClient.startMic: guard absorbs the failure, so this
+      // is the only point at which it can be recorded.
+      diag(result.hasError ? 'rtmp.start.fail' : 'rtmp.start.ok', {
+        'ms': elapsed.elapsedMilliseconds,
+        'ep': '/api/sessions/start',
+        if (result.hasError)
+          'err': describeError(result.error)
+        else
+          'sid': maskId(result.value?.sessionId),
+      });
       resultController.state = result;
     } catch (err) {
       logD('start err : $err');
@@ -71,14 +83,25 @@ class RestClient {
   /// through it and crash.
   Future<void> stopSession(String sessionId) async {
     final url = Uri.parse('${config.httpUrl}/api/sessions/stop');
-    await http
-        .post(
-          url,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'sessionId': sessionId}),
-        )
-        // A hung stop would otherwise strand the dead session in state and get
-        // re-issued on the next teardown.
-        .timeout(const Duration(seconds: 10));
+    final elapsed = Stopwatch()..start();
+    diag('rtmp.stop.req', {'sid': maskId(sessionId)});
+    try {
+      await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'sessionId': sessionId}),
+          )
+          // A hung stop would otherwise strand the dead session in state and
+          // get re-issued on the next teardown.
+          .timeout(const Duration(seconds: 10));
+      diag('rtmp.stop.ok', {'ms': elapsed.elapsedMilliseconds});
+    } catch (error) {
+      diag('rtmp.stop.fail', {
+        'ms': elapsed.elapsedMilliseconds,
+        'err': describeError(error),
+      });
+      rethrow;
+    }
   }
 }

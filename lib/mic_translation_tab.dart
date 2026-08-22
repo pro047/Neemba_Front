@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/audio_capture_service.dart';
 import 'package:mvp/language_option.dart';
+import 'package:mvp/diagnostics.dart';
 import 'package:mvp/log.dart';
 import 'package:mvp/mic_client.dart';
 import 'package:mvp/mic_server_tts_service.dart';
@@ -134,14 +135,25 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     // hardware, and only then touch sockets and the server. Anything that can
     // block on the network must sit behind the microphone being released.
     wsClient.stopReconnecting();
+    // Stamped per stage, not just at the ends. When the session-ended snackbar
+    // failed to appear on 2026-08-20 the two candidates were "too slow to see"
+    // and "an exception before the snackbar line" — these three records tell
+    // them apart, because a missing stage is the exception and a large ms is
+    // the delay. _disposeCapture is deliberately left unguarded: if it throws,
+    // the absent record is the answer.
+    final elapsed = Stopwatch()..start();
+    diag('mic.shutdown.begin', {'sid': maskId(session.sessionId)});
     await _disposeCapture();
+    diag('mic.shutdown.capture', {'ms': elapsed.elapsedMilliseconds});
     await wsClient.close();
+    diag('mic.shutdown.socket', {'ms': elapsed.elapsedMilliseconds});
 
     try {
       await micClient.stopSession(session.sessionId);
     } catch (error) {
       logD('mic session cleanup failed: $error');
     }
+    diag('mic.shutdown.done', {'ms': elapsed.elapsedMilliseconds});
   }
 
   /// Stops a session that was issued after dispose() already captured state,
@@ -152,6 +164,10 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
       return;
     }
     micResultController.state = const AsyncValue.data(null);
+    // A session arriving after dispose is the 2026-08-21 bug's signature. It
+    // is invisible from outside — the tab is already gone — so without this
+    // the only symptom is a session quietly living on the server.
+    diag('mic.orphan.stop', {'sid': maskId(orphan.sessionId)});
     try {
       await micClient.stopSession(orphan.sessionId);
     } catch (error) {

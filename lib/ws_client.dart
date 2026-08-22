@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 
 import 'package:web_socket_channel/io.dart';
+import 'package:mvp/diagnostics.dart';
 import 'package:mvp/log.dart';
 
 /// ws 재시도 예산.
@@ -258,11 +259,17 @@ class WsClient {
     }
 
     logD('ws disconnected: $error (close code $closeCode)');
+    diag('ws.disconnect', {
+      'code': closeCode,
+      'err': describeError(error),
+      'retry': _currentRetry,
+    });
 
     if (closeCode == kWsSessionNotFound) {
       // The server says this session is not live. Nothing to come back to, so
       // stop here instead of spending the rest of the budget on a dead id.
       logD('ws session gone (close code $closeCode) — giving up');
+      diag('ws.giveup', {'code': closeCode, 'reason': 'session-not-found'});
       _shouldReconnect = false;
       onPermanentFailure?.call(error ?? 'session not found');
       return;
@@ -280,6 +287,12 @@ class WsClient {
       );
       await attemptConnect();
     } else {
+      // Distinguished from the close-code giveup above: this one means the
+      // retry budget ran out, which is a different fix than a dead session.
+      diag('ws.giveup', {
+        'reason': 'budget-exhausted',
+        'attempts': _currentRetry,
+      });
       onPermanentFailure?.call(error ?? 'connection closed');
     }
   }

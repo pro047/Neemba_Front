@@ -105,7 +105,7 @@ class Diagnostics {
     record('error', {
       'origin': origin,
       'type': type,
-      'msg': _messageSafeTypes.contains(type) ? error.toString() : '<redacted>',
+      'msg': _keepsMessage(type) ? error.toString() : '<redacted>',
     });
     if (stack != null) {
       // Frames are joined onto one line so a record stays greppable as a unit;
@@ -245,6 +245,23 @@ class Diagnostics {
     }
     return text;
   }
+}
+
+bool _keepsMessage(String type) => Diagnostics._messageSafeTypes.contains(type);
+
+/// Renders an error as a single field value.
+///
+/// Same rule as [Diagnostics.recordError]: the type always survives because it
+/// is what makes a failure diagnosable, and the message only survives for types
+/// that cannot be carrying user speech. Call sites use this instead of
+/// interpolating an error themselves — a `'err': $error'` at any one of them
+/// would put the whole boundary back in the hands of whoever writes the next
+/// log line.
+String describeError(Object? error) {
+  if (error == null) return '<none>';
+  final type = error.runtimeType.toString();
+  // A safe type's toString already names the type, so it is not repeated.
+  return _keepsMessage(type) ? error.toString() : type;
 }
 
 Diagnostics? _active;

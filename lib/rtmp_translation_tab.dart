@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:mvp/language_option.dart';
+import 'package:mvp/diagnostics.dart';
 import 'package:mvp/log.dart';
 import 'package:mvp/provider/input_state_provider.dart';
 import 'package:mvp/provider/rest_client_provider.dart';
@@ -177,6 +178,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       return;
     }
     startSessionResultController.state = const AsyncValue.data(null);
+    // Same signature as the MIC tab's orphan path: nothing on screen can show
+    // this, so the record is the only trace.
+    diag('rtmp.orphan.stop', {'sid': maskId(orphan.sessionId)});
     try {
       await restClient.stopSession(orphan.sessionId);
     } catch (error) {

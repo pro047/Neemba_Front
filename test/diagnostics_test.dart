@@ -161,6 +161,26 @@ void main() {
     });
   });
 
+  group('describeError', () {
+    test('keeps the whole message for an allowlisted type', () {
+      // The errno inside a SocketException message is what separates a DNS
+      // failure from a refused connection, and that distinction is the entire
+      // point of recording start failures.
+      expect(
+        describeError(const SocketException('Failed host lookup')),
+        contains('Failed host lookup'),
+      );
+    });
+
+    test('reduces every other type to its name', () {
+      expect(describeError(_UtteranceException()), '_UtteranceException');
+    });
+
+    test('reports absence instead of printing null', () {
+      expect(describeError(null), '<none>');
+    });
+  });
+
   group('diag', () {
     test('is a no-op before installDiagnostics', () {
       resetDiagnostics();
