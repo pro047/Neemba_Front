@@ -36,6 +36,9 @@ dependencies:
   flutter_tts: ^4.2.3
   flutter_audio_capture: ^1.1.11
   audioplayers: ^6.5.0
+  # Diagnostics need an app-private directory to write to. Dart has no portable
+  # way to ask for one — Directory.current is "/" on Android.
+  path_provider: ^2.1.5
   flutter_dotenv:
     ^6.0.0
 
