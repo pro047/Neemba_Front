@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:mvp/log.dart';
@@ -35,8 +36,9 @@ class Diagnostics {
   /// the oldest — see [_scheduleFlush], which flushes early to keep that rare.
   final int bufferLines;
 
-  /// Rotation threshold for the active file. Two files are kept, so worst-case
-  /// disk use is roughly twice this.
+  /// Rotation threshold for the active file, measured in bytes rather than
+  /// characters so the bound holds for Korean records too. Two files are kept,
+  /// so worst-case disk use is roughly twice this.
   final int maxFileBytes;
 
   final Duration flushInterval;
@@ -187,18 +189,22 @@ class Diagnostics {
         await _directory.create(recursive: true);
       }
       final file = File('${_directory.path}/$_currentName');
-      final existing = await file.exists() ? await file.length() : 0;
-      if (existing > 0 && existing + chunk.length > maxFileBytes) {
-        await _rotate(file);
-      }
       if (_dropped > 0) {
         // Report the gap in the file itself; a silent hole reads as "nothing
         // happened" when the truth is "too much happened".
-        final note = _format(_now(), 'diag.dropped', {'lines': _dropped});
+        chunk = '${_format(_now(), 'diag.dropped', {'lines': _dropped})}\n$chunk';
         _dropped = 0;
-        await file.writeAsString('$note\n', mode: FileMode.append);
       }
-      await file.writeAsString(chunk, mode: FileMode.append, flush: true);
+      // Encoded up front so the size test and the write agree on what a byte
+      // is. String.length counts UTF-16 code units, and File.length() counts
+      // bytes — a Korean field value is one unit and three bytes, so comparing
+      // them let the file grow past the cap by roughly the ratio.
+      final bytes = utf8.encode(chunk);
+      final existing = await file.exists() ? await file.length() : 0;
+      if (existing > 0 && existing + bytes.length > maxFileBytes) {
+        await _rotate(file);
+      }
+      await file.writeAsBytes(bytes, mode: FileMode.append, flush: true);
     } catch (error) {
       // Diagnostics must never be the reason the app dies. A full disk or a
       // revoked directory is not worth taking translation down for.

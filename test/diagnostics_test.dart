@@ -106,6 +106,28 @@ void main() {
       expect(current.readAsStringSync(), isNot(contains('aaa')));
     });
 
+    test('measures the cap in bytes, not UTF-16 code units', () async {
+      // A Korean character is one code unit and three UTF-8 bytes. Sizing the
+      // chunk with String.length while File.length() reports bytes let the
+      // active file grow to roughly three times the cap. Server error messages
+      // and close reasons arrive in Korean, so this is the normal case, not an
+      // exotic one. The threshold below is chosen to sit between the two
+      // measurements: the second flush stays under the cap by characters and
+      // crosses it by bytes.
+      final recorder = build(bufferLines: 10, maxFileBytes: 250);
+      recorder.record('evt', {'msg': '가' * 40});
+      await recorder.flush();
+      recorder.record('evt', {'msg': '나' * 40});
+      await recorder.flush();
+
+      final previous = File('${directory.path}/diagnostics.1.log');
+      expect(previous.existsSync(), isTrue);
+      expect(
+        File('${directory.path}/diagnostics.log').lengthSync(),
+        lessThanOrEqualTo(250),
+      );
+    });
+
     test('readAll returns the rotated file before the current one', () async {
       final recorder = build(bufferLines: 10, maxFileBytes: 100);
       recorder..record('older')..record('older2');
