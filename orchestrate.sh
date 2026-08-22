@@ -376,4 +376,4 @@ done
 
 state "DONE"
 log "=== $FEATURE 완료 ==="
-log "산출물: $WORK/{DESIGN,IMPL,VERIFY}.md"
+log "산출물: $WORK/{DESIGN,JUDGE,IMPL,VERIFY}.md"
