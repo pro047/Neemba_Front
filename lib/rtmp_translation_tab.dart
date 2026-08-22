@@ -438,6 +438,10 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               child: ElevatedButton(
                 onPressed: () {
                   texts = [];
+                  // Clearing is a fresh start. Without this, a user who had
+                  // scrolled up stays opted out of auto-scroll on an empty
+                  // list, with nothing on screen to hint why.
+                  _shouldAutoScroll = true;
                   setState(() {});
                 },
                 child: Text('Clear Text'),
