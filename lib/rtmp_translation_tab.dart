@@ -442,6 +442,9 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                   // scrolled up stays opted out of auto-scroll on an empty
                   // list, with nothing on screen to hint why.
                   _shouldAutoScroll = true;
+                  // Subtitles that are gone from the screen should not keep
+                  // being read aloud. Matches the MIC tab.
+                  unawaited(textToSpeechService.stop());
                   setState(() {});
                 },
                 child: Text('Clear Text'),

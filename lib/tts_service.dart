@@ -37,6 +37,11 @@ class TextToSpeechService {
   int? _currentText;
   bool _isRunning = false;
 
+  /// Bumped by [stop]. The drain loop captures it before each request and
+  /// bails out if it changed, which covers the windows where cancelling the
+  /// engine achieves nothing because no utterance has started yet.
+  int _stopEpoch = 0;
+
   int? get currentSpeakingIndex => _currentText;
 
   Future<void> _configure() async {
@@ -94,8 +99,11 @@ class TextToSpeechService {
     _isRunning = true;
     try {
       while (_queue.isNotEmpty && !_closed) {
+        // Captured before the request leaves the queue: from here on it exists
+        // only as a local, so clearing the queue can no longer reach it.
+        final epoch = _stopEpoch;
         final request = _queue.removeFirst();
-        await _speak(request);
+        await _speak(request, epoch);
       }
     } finally {
       _isRunning = false;
@@ -129,11 +137,16 @@ class TextToSpeechService {
     return resolvedLanguage != language;
   }
 
-  Future<void> _speak(_SpeechRequest request) async {
+  Future<void> _speak(_SpeechRequest request, int epoch) async {
     final resolvedLanguage = await _resolveLanguage(
       request.language,
       fallbackLanguage: 'en-US',
     );
+    // The first utterance of a language makes a real platform round-trip for
+    // availability. A stop landing in that window cancels nothing — there is no
+    // utterance yet — so it has to be caught here or the cleared subtitle is
+    // spoken anyway.
+    if (epoch != _stopEpoch) return;
     try {
       logD(
         'tts autoplay speak: requested=${request.language} resolved=$resolvedLanguage text=${request.text}',
@@ -144,8 +157,12 @@ class TextToSpeechService {
         fallbackLanguage: 'en-US',
       );
     } catch (error) {
+      // A cancelled utterance surfaces here as a failure on some platforms.
+      // Retrying it would re-speak exactly what the user just cleared.
+      if (epoch != _stopEpoch) return;
       logD('tts autoplay retry after error: $error');
       await Future.delayed(const Duration(milliseconds: 120));
+      if (epoch != _stopEpoch) return;
       await _tts.speak(request.text);
     }
   }
@@ -234,6 +251,28 @@ class TextToSpeechService {
         availability == true || availability == 1 || availability == 2;
     _languageAvailability[language] = isAvailable;
     return isAvailable;
+  }
+
+  /// Drops what is queued and silences what is playing, leaving the service
+  /// usable.
+  ///
+  /// Distinct from [dispose], which also sets `_closed` and makes every later
+  /// [enqueue] a no-op. Clearing subtitles is not the end of the session — the
+  /// next line that arrives still has to be spoken.
+  ///
+  /// `_isRunning` is deliberately not touched. The drain loop owns that flag in
+  /// its `finally`, and forcing it false here would let a second drain start
+  /// while the first is still awaiting the engine, putting two loops on one
+  /// queue. Cancelling the engine is enough: the cancel handler completes the
+  /// outcome the loop is waiting on, and it then exits on the empty queue.
+  Future<void> stop() async {
+    if (_closed) return;
+    // Bumped before anything else: the drain loop may be mid-await on a
+    // request it already dequeued, and the epoch is the only handle on it.
+    _stopEpoch++;
+    _queue.clear();
+    _currentText = null;
+    await _tts.stop();
   }
 
   Future<void> dispose() async {
