@@ -225,10 +225,20 @@ class MicServerTtsService {
     }
   }
 
+  /// Drops what is queued and silences what is playing, leaving the service
+  /// usable — unlike [dispose], which sets `_closed` for good.
+  ///
+  /// Advancing the generation is the part that matters. Interrupting only
+  /// reaches playback that has already started; a synthesize POST still in
+  /// flight (15s timeout) carries its own generation number and would pass
+  /// [_isPlaybackCurrent] on return, then play the subtitle the user just
+  /// cleared. Worse, [_interruptPlayback] leaves `_playbackInterrupted` null,
+  /// so that playback would have had nothing left to interrupt it.
   Future<void> stop() async {
     _queue.clear();
     _currentText = null;
     _interruptPlayback();
+    _playbackGeneration += 1;
     await _player.stop();
   }
 
