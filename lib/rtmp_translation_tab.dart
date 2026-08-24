@@ -62,8 +62,12 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     final session = startSessionResultController.state.value;
     if (session != null) {
       _resetSessionStateLater();
+      // Guarded here rather than inside _shutdownSession, which now always
+      // closes the socket for the Stop button's sake. A State that TabBarView
+      // built and dropped mid-drag never owned a session, and running the
+      // teardown anyway would spend diag records on nothing.
+      unawaited(_shutdownSession(session));
     }
-    unawaited(_shutdownSession(session));
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
     super.dispose();
@@ -230,23 +234,31 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     });
   }
 
+  /// Mirrors the MIC tab: the local socket first, then the server session if we
+  /// still own one. Callers with no session still get the local half, because
+  /// the Stop button clears the provider before calling in.
+  ///
+  /// Three stamps, not four — this tab has no capture stage to release.
   Future<void> _shutdownSession(StartSessionResponse? session) async {
+    // Synchronous, so no "연결 끊김" toast fires during teardown.
+    wsClient.stopReconnecting();
+    final elapsed = Stopwatch()..start();
+    diag('rtmp.shutdown.begin', {
+      'sid': session == null ? null : maskId(session.sessionId),
+    });
+    await wsClient.close();
+    diag('rtmp.shutdown.socket', {'ms': elapsed.elapsedMilliseconds});
+
     if (session == null) {
-      // Kept after the per-tab split (P1-7) as defence, not as the fix. The
-      // providers are this tab's own now, so tearing them down can no longer
-      // reach the MIC tab — but TabBarView still builds this page mid-drag and
-      // disposes it when the drag is released back, and a teardown that owns
-      // nothing has nothing to do either way.
       return;
     }
-
-    await wsClient.close();
 
     try {
       await restClient.stopSession(session.sessionId);
     } catch (error) {
       logD('rtmp session cleanup failed: $error');
     }
+    diag('rtmp.shutdown.done', {'ms': elapsed.elapsedMilliseconds});
   }
 
   void onText(String text) {
@@ -410,25 +422,16 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
                   final session = startSessionResultController.state.value;
 
                   screenFlowController.reset();
-
-                  // Synchronous, so no "연결 끊김" toast fires during teardown.
-                  wsClient.stopReconnecting();
-                  await wsClient.close();
-
-                  if (session != null) {
-                    // An offline stop used to throw straight out of onPressed
-                    // as an uncaught async error, and the stale session then
-                    // got stopped a second time from dispose().
-                    try {
-                      await restClient.stopSession(session.sessionId);
-                    } catch (error) {
-                      logD('rtmp session stop failed: $error');
-                    }
-                  }
-
+                  // Clear before tearing down. An offline stop used to throw
+                  // straight out of onPressed as an uncaught async error, and
+                  // the stale session then got stopped a second time from
+                  // dispose(); _shutdownSession swallows that throw now, and
+                  // clearing first closes the tab-swipe window too.
                   startSessionResultController.state = const AsyncValue.data(
                     null,
                   );
+
+                  await _shutdownSession(session);
                 },
                 child: const Text('Stop'),
               ),

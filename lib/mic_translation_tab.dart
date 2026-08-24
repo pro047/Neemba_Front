@@ -79,8 +79,14 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     final session = micResultController.state.value;
     if (session != null) {
       _resetSessionStateLater();
+      // Guarded here rather than inside _shutdownSession, which now always
+      // tears down local resources for the Stop button's sake. TabBarView
+      // builds and disposes this page mid-drag; a State that never owned a
+      // session owns no capture either, and running the teardown anyway would
+      // spend three diag records per drag and push real context out of the
+      // rotation.
+      unawaited(_shutdownSession(session));
     }
-    unawaited(_shutdownSession(session));
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
     super.dispose();
@@ -121,16 +127,11 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     }
   }
 
+  /// Tears down the local resources first, then the server session if we still
+  /// own one. Callers with no session still get the local half: the Stop button
+  /// clears the provider before calling in, and a session the server already
+  /// ended leaves the microphone running until this runs.
   Future<void> _shutdownSession(StartSessionResponse? session) async {
-    if (session == null) {
-      // Kept after the per-tab split (P1-7) as defence, not as the fix. The
-      // providers are this tab's own now, so tearing them down can no longer
-      // reach the URL tab — but TabBarView still builds this page mid-drag and
-      // disposes it when the drag is released back, and a teardown that owns
-      // nothing has nothing to do either way.
-      return;
-    }
-
     // Order matters: silence the retry loop synchronously, release local
     // hardware, and only then touch sockets and the server. Anything that can
     // block on the network must sit behind the microphone being released.
@@ -142,11 +143,19 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
     // the delay. _disposeCapture is deliberately left unguarded: if it throws,
     // the absent record is the answer.
     final elapsed = Stopwatch()..start();
-    diag('mic.shutdown.begin', {'sid': maskId(session.sessionId)});
+    diag('mic.shutdown.begin', {
+      'sid': session == null ? null : maskId(session.sessionId),
+    });
     await _disposeCapture();
     diag('mic.shutdown.capture', {'ms': elapsed.elapsedMilliseconds});
     await wsClient.close();
     diag('mic.shutdown.socket', {'ms': elapsed.elapsedMilliseconds});
+
+    if (session == null) {
+      // Nothing to stop server-side. dispose() never reaches here without a
+      // session, so this is the Stop button on an already-cleared provider.
+      return;
+    }
 
     try {
       await micClient.stopSession(session.sessionId);
@@ -528,26 +537,13 @@ class _MicTranslationTabState extends ConsumerState<MicTranslationTab> {
                   final session = micResultController.state.value;
 
                   ref.read(micScreenFlowProvider.notifier).reset();
-
-                  // Synchronous, so no "연결 끊김" toast can fire once the
-                  // server sees the uplink go away.
-                  wsClient.stopReconnecting();
-
-                  // Local resources first: closing a socket that never
-                  // finished its handshake used to hang here forever, and the
-                  // microphone stayed hot behind it.
-                  await _disposeCapture();
-                  await wsClient.close();
-
-                  if (session != null) {
-                    try {
-                      await micClient.stopSession(session.sessionId);
-                    } catch (error) {
-                      logD('mic session stop failed: $error');
-                    }
-                  }
-
+                  // Clear before tearing down, as _handleMicStartFailure does.
+                  // The teardown can run for seconds, and a tab swipe inside
+                  // that window would see session != null and stop the same id
+                  // a second time.
                   micResultController.state = const AsyncValue.data(null);
+
+                  await _shutdownSession(session);
                 },
                 child: const Text('Stop'),
               ),
