@@ -67,6 +67,33 @@ BUDGET_VERIFY="${BUDGET_VERIFY:-5}"
 
 MODEL_LOG=""   # WORK 확정 후 아래에서 설정
 
+# ── 읽기 허용 디렉터리 ───────────────────────────────
+# 에이전트는 작업 디렉터리 밖을 읽지 못한다. Flutter SDK 소스가 거기 있어서,
+# 프레임워크 API 의 실제 계약(ScrollMetrics.extentAfter 의 정의 등)을 확인할 수 없다.
+# 헤드리스라 승인해 줄 사람도 없으니 확인 요구는 그대로 BLOCKED 이 된다 —
+# 2026-08-25 d5-autoscroll 설계가 실제로 여기서 멈췄다.
+#
+# 확인을 막으면 에이전트가 추측으로 메꾼다. 추측을 근거로 적힌 설계는
+# judge 가 UNVERIFIED 로 잡아내지만, 그 왕복 비용이 SDK 를 읽히는 것보다 비싸다.
+#
+# 읽기 전용 참조물이므로 쓰기 위험은 없다. flutter 실행 파일 경로에서 역산한다.
+FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname "$(dirname "$(readlink -f "$(command -v flutter)" 2>/dev/null || echo /nonexistent)")")}"
+EXTRA_READ_DIRS=()
+[ -d "$FLUTTER_ROOT/packages/flutter/lib" ] && EXTRA_READ_DIRS+=(--add-dir "$FLUTTER_ROOT")
+
+# ── 에이전트가 스스로 돌려도 되는 명령 ────────────────
+# 읽기 전용 검사만 넣는다. 셸이 $TEST_CMD 를 직접 돌려 통과를 판정하는 구조는
+# 그대로다 — 여기서 여는 것은 "판정권" 이 아니라 "제출 전에 스스로 확인할 권한" 이다.
+# 확인 없이 제출하면 셸이 떨어뜨리고, 재시도 1회는 단계 통째 재실행이라 훨씬 비싸다.
+#
+# build·run·pub 계열은 넣지 않는다. 산출물을 만들거나 pubspec 을 바꾸는 명령은
+# 범위 게이트가 보는 워킹트리를 흔든다.
+AGENT_TOOLS=(
+  "Bash(flutter analyze:*)"
+  "Bash(flutter test:*)"
+  "Bash(flutter --version)"
+)
+
 # ── worktree 격리 강제 ───────────────────────────────
 # 각 단계는 --permission-mode acceptEdits 로 돈다. 메인 체크아웃에서 돌리면
 # 사람이 작업 중인 파일을 에이전트가 그대로 덮어쓴다. 규칙으로 부탁하지 않고 막는다.
@@ -160,6 +187,8 @@ run_stage() {
     --max-turns "$turns" \
     --max-budget-usd "$budget" \
     --permission-mode acceptEdits \
+    ${EXTRA_READ_DIRS[@]+"${EXTRA_READ_DIRS[@]}"} \
+    --allowedTools "${AGENT_TOOLS[@]}" \
     --append-system-prompt "$(cat "$PROMPTS/_contract.md")" \
     | tee "$stream" \
     | jq --unbuffered -r '
