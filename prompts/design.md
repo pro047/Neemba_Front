@@ -12,6 +12,14 @@
 - `$ROOT/lib/mic_translation_tab.dart` — 수정 대상. `_shouldAutoScroll` · `_scrollToBottomIfNeeded` · `_handleScroll` · 자막 `ListView.builder`
 - `$ROOT/lib/rtmp_translation_tab.dart` — 같은 로직이 복제돼 있는 두 번째 대상
 - `$ROOT/test/mic_translation_tab_dispose_test.dart`, `$ROOT/test/rtmp_translation_tab_dispose_test.dart` — P0 에서 만든 dispose 가드. 위젯 분리가 이걸 깨뜨릴 수 있다
+- `$WORK/JUDGE.md` — **있을 때만.** 이전 설계본이 판단 검증에서 되돌아왔다는 뜻이다.
+  `REFUTED` 를 받은 주장은 근거째로 폐기하고 다시 세운다 — 같은 결론을 다시 쓰려면
+  그 반박을 반증하는 **새 근거**가 있어야 한다. `UNVERIFIED` 는 확인하거나, 확인하지
+  못하면 등급을 그대로 적는다. "그대로 진행해도 되는 것" 으로 분류된 항목은 재검증
+  없이 재사용해도 된다.
+- `$WORK/DESIGN.md` — **JUDGE.md 가 있을 때만.** 판정 대상이 된 이전 설계본이다.
+  JUDGE.md 의 절 번호 인용을 해석하려면 필요하다. 이번 단계가 덮어쓸 파일이므로
+  읽고 나서 새로 쓴다.
 
 ## 문제 정의
 
