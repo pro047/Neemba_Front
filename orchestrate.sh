@@ -36,11 +36,11 @@ TEST_CMD="${TEST_CMD:-flutter analyze && flutter test}"
 #
 # FALLBACK_* 은 가용성 폴백(529 과부하 등) 전용이다.
 # 안전 분류기에 의한 모델 교체는 이걸로 막을 수 없다 — MODEL_LOG.md 로 감시한다.
-MODEL_DESIGN="${MODEL_DESIGN:-claude-fable-5}"
+MODEL_DESIGN="${MODEL_DESIGN:-claude-fable-5-1}"
 # 판단 검증은 설계를 반박하는 일이라 verify 와 같은 적대적 추론이다. 상위 모델.
-MODEL_JUDGE="${MODEL_JUDGE:-claude-fable-5}"
+MODEL_JUDGE="${MODEL_JUDGE:-claude-fable-5-1}"
 MODEL_IMPL="${MODEL_IMPL:-claude-sonnet-5}"
-MODEL_VERIFY="${MODEL_VERIFY:-claude-fable-5}"
+MODEL_VERIFY="${MODEL_VERIFY:-claude-fable-5-1}"
 
 # 폴백은 티어를 내리지 않는다. 구현 주 모델이 이미 중간 티어라 아래로 갈 곳이 없고,
 # 과부하 때 하위 티어로 떨어뜨리면 산출물 품질이 조용히 무너진다 — 그래서 위로 올린다.
@@ -66,6 +66,33 @@ BUDGET_IMPL="${BUDGET_IMPL:-8}"
 BUDGET_VERIFY="${BUDGET_VERIFY:-5}"
 
 MODEL_LOG=""   # WORK 확정 후 아래에서 설정
+
+# ── 읽기 허용 디렉터리 ───────────────────────────────
+# 에이전트는 작업 디렉터리 밖을 읽지 못한다. Flutter SDK 소스가 거기 있어서,
+# 프레임워크 API 의 실제 계약(ScrollMetrics.extentAfter 의 정의 등)을 확인할 수 없다.
+# 헤드리스라 승인해 줄 사람도 없으니 확인 요구는 그대로 BLOCKED 이 된다 —
+# 2026-08-25 d5-autoscroll 설계가 실제로 여기서 멈췄다.
+#
+# 확인을 막으면 에이전트가 추측으로 메꾼다. 추측을 근거로 적힌 설계는
+# judge 가 UNVERIFIED 로 잡아내지만, 그 왕복 비용이 SDK 를 읽히는 것보다 비싸다.
+#
+# 읽기 전용 참조물이므로 쓰기 위험은 없다. flutter 실행 파일 경로에서 역산한다.
+FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname "$(dirname "$(readlink -f "$(command -v flutter)" 2>/dev/null || echo /nonexistent)")")}"
+EXTRA_READ_DIRS=()
+[ -d "$FLUTTER_ROOT/packages/flutter/lib" ] && EXTRA_READ_DIRS+=(--add-dir "$FLUTTER_ROOT")
+
+# ── 에이전트가 스스로 돌려도 되는 명령 ────────────────
+# 읽기 전용 검사만 넣는다. 셸이 $TEST_CMD 를 직접 돌려 통과를 판정하는 구조는
+# 그대로다 — 여기서 여는 것은 "판정권" 이 아니라 "제출 전에 스스로 확인할 권한" 이다.
+# 확인 없이 제출하면 셸이 떨어뜨리고, 재시도 1회는 단계 통째 재실행이라 훨씬 비싸다.
+#
+# build·run·pub 계열은 넣지 않는다. 산출물을 만들거나 pubspec 을 바꾸는 명령은
+# 범위 게이트가 보는 워킹트리를 흔든다.
+AGENT_TOOLS=(
+  "Bash(flutter analyze:*)"
+  "Bash(flutter test:*)"
+  "Bash(flutter --version)"
+)
 
 # ── worktree 격리 강제 ───────────────────────────────
 # 각 단계는 --permission-mode acceptEdits 로 돈다. 메인 체크아웃에서 돌리면
@@ -97,12 +124,17 @@ touch "$FAIL_LOG" "$MODEL_LOG"
 export FEATURE WORK ROOT
 
 log() { printf '\033[1;36m[orch]\033[0m %s\n' "$*" >&2; }
-die() { state "DIED" "$*"; printf '\033[1;31m[FAIL]\033[0m %s\n' "$*" >&2; exit 2; }
+die() {
+  state "DIED" "$*" "실패했다. $FAIL_LOG 와 위 note 를 읽고 원인을 사람에게 보고해라. 재실행 여부는 사람이 정한다. 런처가 임의로 재실행하지 마라."
+  printf '\033[1;31m[FAIL]\033[0m %s\n' "$*" >&2; exit 2; }
 
-# ─────────────────────────────────────────── 상담역용 상태 브로드캐스트
-# 셸은 대화를 못 한다. 대신 상태를 파일로 흘려서 상담역이 읽게 한다.
+# ─────────────────────────────────────────── 상담역·런처용 상태 브로드캐스트
+# 셸은 대화를 못 한다. 대신 상태를 파일로 흘려서 상담역·런처 세션이 읽게 한다.
+# 3번째 인자가 "## 다음 행동" 블록이 된다 — 런처 계약은 문서(SKILL.md)가 아니라
+# 런처가 실제로 읽는 이 파일에 박는다. 문서에만 적힌 계약은 안 지켜졌다(2026-08-24:
+# 런처 세션이 스크립트 stderr 의 터미널 안내를 그대로 전달하고, 정지 후 갈 길을 잃었다).
 state() {
-  local phase=$1 note=${2:-}
+  local phase=$1 note=${2:-} next=${3:-}
   cat > "$STATE" <<EOF
 # 파이프라인 상태 (셸이 자동 생성 — 사람이 편집하지 말 것)
 
@@ -112,6 +144,9 @@ state() {
 - pid: $$
 - updated: $(date -Iseconds)
 - note: $note
+
+## 다음 행동 (런처 세션은 이 블록만 따르면 된다)
+${next:-진행 중 — 개입 불필요. 이 파일을 다시 읽으면 최신 상태가 보인다.}
 
 ## 지금까지 생성된 산출물
 $(ls -1 "$WORK"/*.md 2>/dev/null | sed 's|.*/|- |' || echo "- (없음)")
@@ -152,6 +187,8 @@ run_stage() {
     --max-turns "$turns" \
     --max-budget-usd "$budget" \
     --permission-mode acceptEdits \
+    ${EXTRA_READ_DIRS[@]+"${EXTRA_READ_DIRS[@]}"} \
+    --allowedTools "${AGENT_TOOLS[@]}" \
     --append-system-prompt "$(cat "$PROMPTS/_contract.md")" \
     | tee "$stream" \
     | jq --unbuffered -r '
@@ -204,10 +241,10 @@ run_stage() {
     DONE)
       log "  ✔ $name DONE" ;;
     BLOCKED)
-      state "BLOCKED:$name" "사람 판단 필요"
+      state "BLOCKED:$name" "사람 판단 필요" "$artifact 의 BLOCKED_REASON·BLOCKED_NEEDS 를 사람에게 보고하고 결정을 받아라. 결정 전에는 재실행하지 마라 — 같은 곳에서 또 막힌다."
       log "  ⛔ $name BLOCKED"
       sed -n '/^BLOCKED_REASON:/,$p' "$artifact" >&2
-      printf '\n\033[1;33m→ 터미널 2에서 이렇게 물어봐:\033[0m\n  "%s BLOCKED 났어. 원인 뭐야?"\n\n' "$name" >&2
+      printf '\n\033[1;33m→ 상담역(advisor.sh 또는 런처 세션)에게 물어봐:\033[0m\n  "%s BLOCKED 났어. 원인 뭐야?"\n\n' "$name" >&2
       exit 3 ;;
     *)
       die "$name: STATUS 라인 없음 또는 형식 위반 (DONE|BLOCKED 필수)" ;;
@@ -216,14 +253,33 @@ run_stage() {
 
 # ─────────────────────────────────────────── 사람 게이트
 # 상담역은 여기에 손댈 수 없다. 오직 사람만 누른다.
+# 파일 내용 해시 — 승인 마커가 "무엇을 승인했는가"를 내용 단위로 기억하는 키.
+# approve.sh 의 file_hash 와 결과가 같아야 한다 (run-tests 가 교차 검증한다).
+file_hash() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"
+  else sha256sum "$1"; fi | awk '{print $1}'
+}
+
 gate_human() {
-  # force=1 이면 AUTO=1(무인)이어도 반드시 멈춘다. 판단 검증이 뭔가를 걸었을 때처럼
-  # "사람이 봐야만 하는" 게이트에 쓴다.
   local msg=$1 file=$2 force=${3:-0}
+
+  # 승인 마커: 사람이 approve.sh 로 "이 내용을 검토했다"를 남긴 것.
+  # 해시로 내용에 묶여 있어 승인 후 파일이 바뀌면 무효가 된다.
+  # AUTO 보다 먼저 본다 — 명시적 승인은 force 게이트까지 통과시키는 유일한
+  # 무인 경로다 (AUTO 는 force 를 못 넘는다).
+  local marker="$file.approved"
+  if [ -f "$marker" ]; then
+    if [ "$(cat "$marker")" = "$(file_hash "$file")" ]; then
+      log "  ✔ 승인 마커 — 게이트 통과: $msg"
+      return 0
+    fi
+    log "  ⚠ 승인 마커가 낡음 ($(basename "$file") 이 승인 뒤에 바뀜) — 재승인 필요"
+  fi
+
   [ "$AUTO" = "1" ] && [ "$force" != "1" ] \
     && { log "  (AUTO=1 — 게이트 통과: $msg)"; return 0; }
 
-  state "GATE" "$msg"
+  state "GATE" "$msg" "tty 게이트에서 사람 응답 대기 중 — 런처 개입 불필요."
   cat >&2 <<EOF
 
 $(printf '\033[1;33m[게이트]\033[0m') $msg
@@ -233,15 +289,25 @@ $(printf '\033[1;33m[게이트]\033[0m') $msg
   y = 진행   e = 열어보기   n = 중단
 EOF
   printf '  > ' >&2
-  # `|| ans=n` 은 tty 가 없을 때(cron·백그라운드·CI)를 위한 것이다. 이 스크립트는
-  # set -e 로 돌기 때문에 /dev/tty 를 못 열면 read 가 rc=1 로 끝나 그 자리에서
-  # exit 1 이 된다 — case 도 die 도 타지 않아 호출자가 "게이트에서 막힘"을
-  # 다른 실패와 구분할 수 없다. 없는 tty 는 "사람이 y 를 누르지 않았다"와 같은
-  # 뜻이므로 중단(n)으로 떨어뜨려 의도한 die 경로를 타게 한다.
-  local ans; read -r ans < /dev/tty || ans=n
+  # tty 가 없으면(런처 모드·cron·CI) read 가 rc=1 로 끝난다. 예전에는 n 과 같이
+  # 취급해 exit 2 로 죽였는데, 그러면 호출자가 "사람이 거부함"(2)과 "사람이 아직
+  # 검토하지 않음"을 구분할 수 없다. 후자는 별도 코드(4)로 내보내고 승인 방법을
+  # 찍어 준다 — 사람이 approve.sh 로 마커를 만들고 재실행하면 위의 마커 검사로
+  # 통과한다. `|| ans=...` 가드가 없으면 set -e 가 read 실패 지점에서 exit 1 을
+  # 내 어느 경로도 타지 못한다 (2026-08-18 실전에서 밟은 함정).
+  local ans; read -r ans < /dev/tty || ans=__NO_TTY__
   case "$ans" in
     y|Y) return 0 ;;
     e|E) "${EDITOR:-less}" "$file"; gate_human "$msg" "$file" "$force" ;;
+    __NO_TTY__)
+      state "AWAITING_APPROVAL" "$msg — $(basename "$file")" "1) $file 을 사람에게 보여줘라. 2) 승인은 사람만 한다 — 별도 터미널에서 $ROOT/approve.sh $FEATURE $(basename "$file") 실행. 런처가 대신 실행하거나 .approved 를 직접 쓰는 것은 금지다. 3) 승인 후 같은 명령으로 재실행하면 이 게이트는 마커로 통과한다."
+      {
+        printf '\033[1;33m[승인 대기]\033[0m tty 가 없어 게이트에서 멈춘다 (exit 4)\n'
+        printf '  검토 대상: %s\n' "$file"
+        printf '  검토한 사람이 터미널에서 직접:  %s/approve.sh %s %s\n' "$ROOT" "$FEATURE" "$(basename "$file")"
+        printf '  승인 후 재실행하면 이 게이트는 마커로 통과한다 (내용이 바뀌면 무효)\n'
+      } >&2
+      exit 4 ;;
     *)   die "사람이 중단함" ;;
   esac
 }
@@ -297,7 +363,7 @@ gate_scope() {
 ATTEMPT=0
 state "START"
 log "=== $FEATURE 시작 ==="
-log "상담역 띄우려면 다른 터미널에서: ./advisor.sh $FEATURE"
+log "상담 창구: 터미널이면 ./advisor.sh $FEATURE, 런처 세션이면 $WORK/STATE.md 를 읽어라"
 
 if [ "$FRESH_DESIGN" != "1" ] && [ -f "$WORK/DESIGN.md" ] \
    && [ "$(grep -m1 '^STATUS:' "$WORK/DESIGN.md" | awk '{print $2}')" = "DONE" ]; then
@@ -374,6 +440,6 @@ while :; do
   gate_human "재시도 $((ATTEMPT + 1)) 진행? (상담역에게 FAIL_LOG 물어봐도 됨)" "$FAIL_LOG"
 done
 
-state "DONE"
+state "DONE" "" "완주다. 산출물($WORK/{DESIGN,JUDGE,IMPL,VERIFY}.md)과 테스트 통과 사실을 사람에게 보고해라."
 log "=== $FEATURE 완료 ==="
 log "산출물: $WORK/{DESIGN,JUDGE,IMPL,VERIFY}.md"

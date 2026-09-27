@@ -66,9 +66,10 @@ flutter_launcher_icons:
   image_path: "assets/icon/icon.png"
 
   android: true
-  # Adaptive icon layers. The foreground must keep its artwork inside the
-  # central 66% — launchers mask the outer area into circles, squircles, etc.
-  adaptive_icon_background: "#FFFFFF"
+  # Adaptive icon layers. The generated ic_launcher.xml insets the foreground by
+  # 16%, which maps the source PNG onto 73.44dp of the 108dp canvas; the 72dp mask
+  # circle then lands at radius 502px in a 1024px source. Keep artwork inside that.
+  adaptive_icon_background: "#0F172A"
   adaptive_icon_foreground: "assets/icon/icon_foreground.png"
 
   ios: true
@@ -77,8 +78,8 @@ flutter_launcher_icons:
 
   web:
     generate: true
-    background_color: "#FFFFFF"
-    theme_color: "#FFFFFF"
+    background_color: "#0F172A"
+    theme_color: "#0F172A"
 
   macos:
     generate: true

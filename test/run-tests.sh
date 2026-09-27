@@ -22,10 +22,10 @@ setup() {
   git init -q .
   git config user.email t@t; git config user.name t
   mkdir -p prompts test
-  cp "$SRC/orchestrate.sh" .
+  cp "$SRC/orchestrate.sh" "$SRC/approve.sh" .
   cp "$SRC/prompts/"*.md prompts/
   cp "$HERE/fake-claude" test/claude       # ← 이름이 'claude' 여야 가로챈다
-  chmod +x orchestrate.sh test/claude
+  chmod +x orchestrate.sh approve.sh test/claude
   printf '.pipeline/\n' > .gitignore
   echo x > x.txt; git add -A; git commit -qm init
   export PATH="$SANDBOX/test:$PATH"
@@ -127,7 +127,7 @@ echo "=== 모델 교체 감시 ==="
 setup
 env FAKE_SCENARIO=model_swap AUTO=1 TEST_CMD="true" \
   ./orchestrate.sh feat >/dev/null 2>&1
-if grep -q '요청 claude-fable-5 → 실제 claude-opus-4-8' .pipeline/feat/MODEL_LOG.md 2>/dev/null; then
+if grep -q '요청 claude-fable-5-1 → 실제 claude-opus-4-8' .pipeline/feat/MODEL_LOG.md 2>/dev/null; then
   green "  PASS  다른 모델이 돌면 MODEL_LOG 에 기록된다"; PASS=$((PASS+1))
 else
   red   "  FAIL  모델 교체가 기록되지 않음"
@@ -140,10 +140,12 @@ echo
 echo "=== 상담역 상태 창구 ==="
 setup
 env FAKE_SCENARIO=ok AUTO=1 TEST_CMD="true" ./orchestrate.sh feat >/dev/null 2>&1
-if grep -q 'phase: DONE' .pipeline/feat/STATE.md 2>/dev/null; then
-  green "  PASS  STATE.md 가 최종 상태를 반영한다"; PASS=$((PASS+1))
+if grep -q 'phase: DONE' .pipeline/feat/STATE.md 2>/dev/null \
+   && grep -q '## 다음 행동' .pipeline/feat/STATE.md \
+   && grep -q '완주' .pipeline/feat/STATE.md; then
+  green "  PASS  STATE.md 가 최종 상태와 다음 행동을 반영한다"; PASS=$((PASS+1))
 else
-  red   "  FAIL  STATE.md 미갱신"; FAIL=$((FAIL+1))
+  red   "  FAIL  STATE.md 미갱신 또는 다음 행동 블록 없음"; FAIL=$((FAIL+1))
 fi
 teardown
 
@@ -178,10 +180,10 @@ d="$(cat .pipeline/feat/DESIGN.args 2>/dev/null)"
 i="$(cat .pipeline/feat/IMPL.args   2>/dev/null)"
 j="$(cat .pipeline/feat/JUDGE.args  2>/dev/null)"
 v="$(cat .pipeline/feat/VERIFY.args 2>/dev/null)"
-if [ "$d" = "model=claude-fable-5 turns=40 budget=5" ] \
-   && [ "$j" = "model=claude-fable-5 turns=40 budget=5" ] \
+if [ "$d" = "model=claude-fable-5-1 turns=40 budget=5" ] \
+   && [ "$j" = "model=claude-fable-5-1 turns=40 budget=5" ] \
    && [ "$i" = "model=claude-sonnet-5 turns=80 budget=8" ] \
-   && [ "$v" = "model=claude-fable-5 turns=40 budget=5" ]; then
+   && [ "$v" = "model=claude-fable-5-1 turns=40 budget=5" ]; then
   green "  PASS  설계/검증=fable 40턴, 구현=소넷 80턴 이 각각 전달된다"; PASS=$((PASS+1))
 else
   red   "  FAIL  상한 전달 어긋남"
@@ -207,9 +209,10 @@ echo "=== 판단 검증 게이트 ==="
 # 그 줄이 없으면 "판정 없음"이 아니라 "형식 위반"으로 죽어야 한다.
 expect "카운트 라인이 없으면 죽는다"            2 -- FAKE_SCENARIO=ok FAKE_JUDGE_COUNTS=no
 # 반박·미확인이 하나라도 있으면 AUTO=1(무인)이어도 사람을 부른다.
-# 테스트 환경엔 tty 가 없으므로 read 가 n 으로 떨어져 die(2) 가 정답이다.
-expect "반박이 있으면 무인 실행도 멈춘다"       2 -- FAKE_SCENARIO=ok FAKE_REFUTED=2
-expect "미확인이 있어도 무인 실행이 멈춘다"     2 -- FAKE_SCENARIO=ok FAKE_UNVERIFIED=1
+# 테스트 환경엔 tty 가 없으므로 승인 대기(exit 4)로 멈추는 게 정답이다 —
+# "사람이 거부함"(2)이 아니라 "사람이 아직 검토 안 함"(4)이다 (런처 모드 계약).
+expect "반박이 있으면 무인 실행도 멈춘다"       4 -- FAKE_SCENARIO=ok FAKE_REFUTED=2
+expect "미확인이 있어도 무인 실행이 멈춘다"     4 -- FAKE_SCENARIO=ok FAKE_UNVERIFIED=1
 expect "반박·미확인이 0 이면 그냥 지나간다"     0 -- FAKE_SCENARIO=ok
 
 # judge 프롬프트는 출력(JUDGE.md)을 먼저, 입력(DESIGN.md)을 나중에 말한다.
@@ -226,6 +229,63 @@ else
   red   "  FAIL  DESIGN.md 가 훼손됐거나 JUDGE.md 가 안 나옴"; FAIL=$((FAIL+1))
 fi
 teardown
+
+echo
+echo "=== 승인 마커 (런처 모드) ==="
+# 런처 모드의 계약 세 가지를 검사한다:
+#   1) 사람이 남긴 마커는 tty 없는 게이트를 통과시킨다
+#   2) 승인 후 내용이 바뀐 마커(낡은 마커)는 통과시키지 않는다
+#   3) approve.sh 자체가 tty 없이는 마커를 만들지 못한다 (런처 대리 승인 차단)
+# 1의 마커는 approve.sh --hash 로 만든다 — orchestrate.sh 의 file_hash 와
+# 구현이 어긋나면 이 케이스가 잡는다 (교차 검증).
+if command -v python3 >/dev/null 2>&1; then
+  detach() { python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"; }
+
+  setup
+  mkdir -p .pipeline/feat
+  printf 'STATUS: DONE\n\n(검토된 설계)\n\nALLOWED_FILES:\n- x.txt\n\n' > .pipeline/feat/DESIGN.md
+  sleep 1
+  printf 'STATUS: DONE\nUNVERIFIED: 0 REFUTED: 0\n' > .pipeline/feat/JUDGE.md
+  ./approve.sh --hash .pipeline/feat/DESIGN.md > .pipeline/feat/DESIGN.md.approved
+  got=0
+  detach env FAKE_SCENARIO=ok AUTO=0 TEST_CMD=true ./orchestrate.sh feat >/dev/null 2>&1 || got=$?
+  if [ "$got" -eq 0 ] && [ -f .pipeline/feat/IMPL.md ]; then
+    green "  PASS  유효한 승인 마커는 tty 없는 게이트를 통과시킨다"; PASS=$((PASS+1))
+  else
+    red   "  FAIL  마커 통과 실패 — exit=$got (기대 0)"; FAIL=$((FAIL+1))
+  fi
+  teardown
+
+  setup
+  mkdir -p .pipeline/feat
+  printf 'STATUS: DONE\n\n(검토된 설계)\n\nALLOWED_FILES:\n- x.txt\n\n' > .pipeline/feat/DESIGN.md
+  sleep 1
+  printf 'STATUS: DONE\nUNVERIFIED: 0 REFUTED: 0\n' > .pipeline/feat/JUDGE.md
+  echo "stale-hash-of-previously-approved-content" > .pipeline/feat/DESIGN.md.approved
+  got=0
+  detach env FAKE_SCENARIO=ok AUTO=0 TEST_CMD=true ./orchestrate.sh feat >/dev/null 2>&1 || got=$?
+  if [ "$got" -eq 4 ] && [ ! -f .pipeline/feat/IMPL.md ] \
+     && grep -q 'approve.sh feat DESIGN.md' .pipeline/feat/STATE.md 2>/dev/null; then
+    green "  PASS  낡은 마커는 통과시키지 않고 STATE 에 승인 안내를 남긴다"; PASS=$((PASS+1))
+  else
+    red   "  FAIL  낡은 마커 — exit=$got (기대 4)$([ -f .pipeline/feat/IMPL.md ] && echo ', IMPL.md 생성됨')"; FAIL=$((FAIL+1))
+  fi
+  teardown
+
+  setup
+  mkdir -p .pipeline/feat
+  printf 'STATUS: DONE\n' > .pipeline/feat/DESIGN.md
+  got=0
+  detach ./approve.sh feat DESIGN.md >/dev/null 2>&1 || got=$?
+  if [ "$got" -ne 0 ] && [ ! -f .pipeline/feat/DESIGN.md.approved ]; then
+    green "  PASS  approve.sh 는 tty 없이 마커를 만들지 않는다"; PASS=$((PASS+1))
+  else
+    red   "  FAIL  tty 없는 approve — exit=$got$([ -f .pipeline/feat/DESIGN.md.approved ] && echo ', 마커 생성됨')"; FAIL=$((FAIL+1))
+  fi
+  teardown
+else
+  red "  SKIP  승인 마커 케이스 — python3 없음 (setsid 대체 불가)"
+fi
 
 echo
 echo "=== 범위 이탈 게이트 ==="
