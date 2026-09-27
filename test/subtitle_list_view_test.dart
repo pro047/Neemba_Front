@@ -144,4 +144,64 @@ void main() {
     expect(position(tester).maxScrollExtent, greaterThan(0));
     expect(position(tester).extentAfter, moreOrLessEquals(0, epsilon: 1.0));
   });
+
+  testWidgets('(e) touching mid-animation away from the bottom stops following', (
+    tester,
+  ) async {
+    await mount(tester);
+
+    for (var i = 0; i < 20; i++) {
+      hostKey.currentState!.add();
+    }
+    await tester.pump(); // post-frame callback starts the animation
+    await tester.pump(); // first tick fixes the animation start time
+    await tester.pump(const Duration(milliseconds: 100));
+    // Precondition: caught mid-animation, clearly above the bottom.
+    expect(position(tester).extentAfter, greaterThan(48));
+
+    // Touch without moving: stops the animation but emits no user-scroll
+    // direction or drag delta.
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    final before = position(tester).pixels;
+    expect(position(tester).extentAfter, greaterThan(48));
+
+    hostKey.currentState!.add();
+    await tester.pumpAndSettle();
+
+    expect(position(tester).pixels, before);
+  });
+
+  testWidgets('(f) touching mid-animation near the bottom keeps following', (
+    tester,
+  ) async {
+    await mount(tester);
+    await fillAndSettle(tester, 20);
+
+    hostKey.currentState!.add();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    // Precondition: still animating, but already within the bottom threshold.
+    // Above the 0.5px settle epsilon, so the stop takes the hold branch.
+    expect(position(tester).extentAfter, greaterThan(0.5));
+    expect(position(tester).extentAfter, lessThanOrEqualTo(48));
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    hostKey.currentState!.add();
+    await tester.pumpAndSettle();
+
+    expect(position(tester).extentAfter, moreOrLessEquals(0, epsilon: 1.0));
+  });
 }

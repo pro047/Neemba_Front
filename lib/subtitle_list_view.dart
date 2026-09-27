@@ -36,6 +36,8 @@ class _SubtitleListViewState extends State<SubtitleListView> {
   bool _pending = false;
   late int _lastItemCount;
   int _generation = 0;
+  // Target of the auto-scroll animation in flight, null when none is running.
+  double? _animTarget;
 
   bool _isAtBottom(ScrollMetrics m) => m.extentAfter <= _kBottomThreshold;
 
@@ -76,6 +78,7 @@ class _SubtitleListViewState extends State<SubtitleListView> {
       _userDriven = false;
       _generation++;
       final myGeneration = _generation;
+      _animTarget = target;
       _controller
           .animateTo(
             target,
@@ -85,7 +88,12 @@ class _SubtitleListViewState extends State<SubtitleListView> {
           .whenComplete(() {
             if (!mounted) return;
             if (myGeneration != _generation) return;
+            _animTarget = null;
             if (!_controller.hasClients) return;
+            // Stopped short of the target: a touch interrupted it. Don't
+            // restart from here. A new subtitle still schedules a fresh
+            // animation even while a finger rests near the bottom.
+            if (_controller.position.pixels < target - _kSettleEpsilon) return;
             // Only re-correct if maxScrollExtent grew after landing — that is
             // the stale-target case, not merely "not perfectly at the bottom".
             if (_controller.position.maxScrollExtent >
@@ -113,6 +121,12 @@ class _SubtitleListViewState extends State<SubtitleListView> {
       if (_userDriven) {
         _autoScroll = _isAtBottom(notification.metrics);
         _userDriven = false;
+      } else if (_animTarget != null &&
+          notification.metrics.pixels < _animTarget! - _kSettleEpsilon) {
+        // Our animation ended short of its target with no drag: a touch
+        // stopped it (hold). A normal landing ends at the target, and one
+        // animation replacing another emits no ScrollEnd, so neither gets here.
+        _autoScroll = _isAtBottom(notification.metrics);
       }
     }
     return false;
