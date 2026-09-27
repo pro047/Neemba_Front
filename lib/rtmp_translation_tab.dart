@@ -12,6 +12,7 @@ import 'package:mvp/provider/result_provider.dart';
 import 'package:mvp/provider/screen_change_provider.dart';
 import 'package:mvp/provider/ws_client_provider.dart';
 import 'package:mvp/rest_client.dart';
+import 'package:mvp/subtitle_list_view.dart';
 import 'package:mvp/tts_service.dart';
 import 'package:mvp/type.dart';
 import 'package:mvp/ws_client.dart';
@@ -36,8 +37,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
   late final StateController<AsyncValue<StartSessionResponse?>>
   startSessionResultController;
   List<String> texts = <String>[];
-  late final ScrollController _scrollController;
-  bool _shouldAutoScroll = true;
   bool _isStartingRtmp = false;
 
   TargetLanguageOption get _targetLanguage =>
@@ -50,7 +49,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     restClient = ref.read(restClientProvider);
     screenFlowController = ref.read(rtmpScreenFlowProvider.notifier);
     startSessionResultController = ref.read(startSessionResultProvider.notifier);
-    _scrollController = ScrollController()..addListener(_handleScroll);
     super.initState();
   }
 
@@ -68,8 +66,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       // teardown anyway would spend diag records on nothing.
       unawaited(_shutdownSession(session));
     }
-    _scrollController.removeListener(_handleScroll);
-    _scrollController.dispose();
     super.dispose();
   }
 
@@ -270,7 +266,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
     texts.add(text);
     textToSpeechService.enqueue(text, language: _targetLanguage.ttsLocale);
     setState(() {});
-    _scrollToBottomIfNeeded();
   }
 
   void handleTap(int index) async {
@@ -290,27 +285,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
       return;
     }
     setState(() {});
-  }
-
-  void _scrollToBottomIfNeeded() {
-    if (!_shouldAutoScroll) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    });
-  }
-
-  void _handleScroll() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    final threshold = 48.0;
-    final isNearBottom =
-        position.pixels >= position.maxScrollExtent - threshold;
-    _shouldAutoScroll = isNearBottom;
   }
 
   //
@@ -441,10 +415,6 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               child: ElevatedButton(
                 onPressed: () {
                   texts = [];
-                  // Clearing is a fresh start. Without this, a user who had
-                  // scrolled up stays opted out of auto-scroll on an empty
-                  // list, with nothing on screen to hint why.
-                  _shouldAutoScroll = true;
                   // Subtitles that are gone from the screen should not keep
                   // being read aloud. Matches the MIC tab.
                   unawaited(textToSpeechService.stop());
@@ -462,17 +432,10 @@ class _RtmpTranslationTabState extends ConsumerState<RtmpTranslationTab> {
               ),
               height: 400,
               width: double.infinity,
-              child: ListView.builder(
-                controller: _scrollController,
-                itemCount: texts.length,
-                itemBuilder:
-                    (context, index) => ListTile(
-                      title: Text('‣ ${texts[index]}'),
-                      trailing: Icon(
-                        current == index ? Icons.stop : Icons.play_arrow,
-                      ),
-                      onTap: () => handleTap(index),
-                    ),
+              child: SubtitleListView(
+                texts: texts,
+                speakingIndex: current,
+                onTapItem: handleTap,
               ),
             ),
           ],
