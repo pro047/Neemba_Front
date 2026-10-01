@@ -1,0 +1,11 @@
+# serial-agent-pipeline 저장소 설정 — KEY=value, 값은 글자 그대로 (셸 확장 없음). sap doctor 로 점검.
+# 엔진 기본값과 다른 것만 둔다.
+
+TEST_CMDS=flutter analyze
+TEST_CMDS=flutter test
+
+# Engine default git read tools plus this repo's read-only checks (no build/run/pub — they mutate the tree).
+AGENT_TOOLS=Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git ls-files:*),Bash(flutter analyze:*),Bash(flutter test:*),Bash(flutter --version)
+
+# Flutter SDK source, read-only, so design/judge can check framework contracts.
+ADD_DIRS=/Users/ijinseong/Documents/flutter
