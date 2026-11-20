@@ -42,6 +42,19 @@ const Duration kWsConnectTimeout = Duration(seconds: 10);
 /// user is willing to hold a dead Stop button.
 const Duration kWsCloseTimeout = Duration(seconds: 3);
 
+/// Client-initiated ping interval. Without it a silently dead TCP link (no FIN,
+/// no RST — a NAT drop or a radio handover) leaves the stream open forever: no
+/// onDone, no onError, so the retry loop never starts. dart:io closes the
+/// socket with 1001 when a ping goes unanswered for one more interval, which
+/// lands in the ordinary onDone reconnect path, so a dead link is noticed
+/// within ~2x this value.
+///
+/// Not tied to the server's application ping ({"type":"ping"} every 30s):
+/// waiting on that would need a silence threshold well past 30s to avoid
+/// false alarms. Protocol pongs come from the server's websockets library and
+/// pass through nginx untouched.
+const Duration kWsPingInterval = Duration(seconds: 15);
+
 /// Backoff for the [attempt]-th retry (1-based): initial * 2^(attempt-1),
 /// clamped to [max]. Uncapped doubling would reach ~34min by retry 12 — the
 /// cap keeps the whole budget inside the server's 5-minute reconnect window.
@@ -72,12 +85,24 @@ class WsClient {
   final String? _baseHttpUrl;
   IOWebSocketChannel? _channel;
   StreamSubscription? _subscription;
+  final Duration _pingInterval;
   bool _shouldReconnect = false;
   int _currentRetry = 0;
 
-  WsClient({Map<String, dynamic>? headers, String? baseHttpUrl})
-    : _headers = headers ?? const {},
-      _baseHttpUrl = baseHttpUrl;
+  /// Bumped by every [connectWithRetry] and [stopReconnecting]. Each retry
+  /// chain remembers the value it started with and stands down once it no
+  /// longer matches. [_shouldReconnect] alone cannot do this: a chain asleep
+  /// in its backoff sees the flag that the *next* connect turned back on, then
+  /// wakes up and discards that connect's channel.
+  int _generation = 0;
+
+  WsClient({
+    Map<String, dynamic>? headers,
+    String? baseHttpUrl,
+    Duration pingInterval = kWsPingInterval,
+  })  : _headers = headers ?? const {},
+        _baseHttpUrl = baseHttpUrl,
+        _pingInterval = pingInterval;
 
   Uri _buildUri(String webSocketUrl) {
     final rawUri = Uri.parse(webSocketUrl);
@@ -101,6 +126,7 @@ class WsClient {
   void stopReconnecting() {
     _shouldReconnect = false;
     _currentRetry = 0;
+    _generation++;
   }
 
   /// Releases the channel. Closing one that never finished its handshake never
@@ -146,13 +172,15 @@ class WsClient {
     logD('WS connect (retry) session=${maskId(sessionId)} raw=${maskUrl(webSocketUrl)}');
     _shouldReconnect = true;
     _currentRetry = 0;
+    final generation = ++_generation;
+    bool isCurrent() => generation == _generation && _shouldReconnect;
 
     // Declared first so attemptConnect's listeners can schedule a retry, and
     // assigned below once retryConnect exists.
     late final Future<void> Function() retryConnect;
 
     Future<void> attemptConnect() async {
-      if (!_shouldReconnect) return;
+      if (!isCurrent()) return;
       final url = _buildUri(webSocketUrl);
       logD(
         'webSocket url (session ${maskId(sessionId)}, retry #$_currentRetry): '
@@ -161,16 +189,29 @@ class WsClient {
       // The previous attempt's channel may have died mid-handshake; discarding
       // it must not stall the retry that is trying to replace it.
       await _discardChannel();
-      _channel = IOWebSocketChannel.connect(
+      // The discard can take seconds; a newer chain may have started meanwhile.
+      if (!isCurrent()) return;
+      final channel = IOWebSocketChannel.connect(
         url,
         headers: _headers,
+        pingInterval: _pingInterval,
         connectTimeout: kWsConnectTimeout,
       );
+      _channel = channel;
       // connect() returns before the socket is open; ready completes only
       // after the handshake, so a failed connection throws here instead of
       // being mistaken for a live connection.
-      await _channel!.ready;
-      _subscription = _channel!.stream.listen(
+      await channel.ready;
+      if (!isCurrent()) {
+        // Superseded mid-handshake. The field may already hold a newer
+        // chain's channel, so only this attempt's own socket is released.
+        if (identical(_channel, channel)) _channel = null;
+        unawaited(
+          channel.sink.close().timeout(kWsCloseTimeout).catchError((_) {}),
+        );
+        return;
+      }
+      _subscription = channel.stream.listen(
           (event) {
             logD('event : $event');
             if (_isPingEvent(event)) {
@@ -180,7 +221,8 @@ class WsClient {
           },
         onDone: () => unawaited(
           _handleDisconnect(
-            closeCode: _channel?.closeCode,
+            generation: generation,
+            closeCode: channel.closeCode,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
             maxBackoff: maxBackoff,
@@ -192,8 +234,9 @@ class WsClient {
         ),
         onError: (e) => unawaited(
           _handleDisconnect(
+            generation: generation,
             error: e,
-            closeCode: _channel?.closeCode,
+            closeCode: channel.closeCode,
             maxRetries: maxRetries,
             initialBackoff: initialBackoff,
             maxBackoff: maxBackoff,
@@ -210,6 +253,7 @@ class WsClient {
       );
 
       if (_currentRetry > 0) {
+        diag('ws.reconnect.ok', {'attempts': _currentRetry});
         onReconnected?.call();
         _currentRetry = 0;
       }
@@ -223,6 +267,7 @@ class WsClient {
       } catch (e) {
         unawaited(
           _handleDisconnect(
+            generation: generation,
             error: e,
             closeCode: _channel?.closeCode,
             maxRetries: maxRetries,
@@ -243,6 +288,7 @@ class WsClient {
   }
 
   Future<void> _handleDisconnect({
+    required int generation,
     Object? error,
     int? closeCode,
     required int maxRetries,
@@ -253,7 +299,7 @@ class WsClient {
     required void Function(Object error)? onPermanentFailure,
     required Future<void> Function() attemptConnect,
   }) async {
-    if (!_shouldReconnect) {
+    if (generation != _generation || !_shouldReconnect) {
       logD('ws closed manually');
       return;
     }
