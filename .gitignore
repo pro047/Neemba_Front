@@ -68,3 +68,4 @@ android/captures/
 # device identifiers. This remote is public, so it stays local.
 HANDOFF.json
 HANDOFF-ARCHIVE.json
+!.env.example
