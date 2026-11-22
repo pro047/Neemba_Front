@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mvp/api_config.dart';
 import 'package:mvp/diagnostics.dart';
+import 'package:mvp/diagnostics_upload.dart';
 import 'package:mvp/log.dart';
 import 'package:mvp/mode_select_screen.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -32,6 +34,10 @@ void main() {
       };
       await dotenv.load(fileName: envFile);
 
+      // After dotenv (the endpoint comes from HOST) and before app.start, which
+      // is itself an upload trigger.
+      _attachUploader();
+
       diag('app.start', {
         'env': env.isEmpty ? '<default>' : env,
         'file': envFile,
@@ -57,7 +63,9 @@ void main() {
 Future<void> _installDiagnostics() async {
   final Diagnostics recorder;
   try {
-    recorder = Diagnostics(directory: await getApplicationSupportDirectory());
+    recorder = await Diagnostics.open(
+      directory: await getApplicationSupportDirectory(),
+    );
   } catch (error) {
     // No directory means no diagnostics, not a dead app. Translation has to
     // keep working on a device where the lookup fails.
@@ -83,6 +91,25 @@ Future<void> _installDiagnostics() async {
     // returns false so the default handler still surfaces it.
     return kReleaseMode;
   };
+}
+
+/// Wires the uploader to the installed recorder. A missing recorder or HOST
+/// means no uploads, never a failed start.
+void _attachUploader() {
+  final recorder = diagnostics;
+  if (recorder == null) return;
+  try {
+    final config = ApiConfig.local();
+    attachUploader(
+      recorder,
+      DiagnosticsUploader(
+        diagnostics: recorder,
+        endpoint: diagnosticsUploadEndpoint(config.httpUrl),
+      ),
+    );
+  } catch (error) {
+    logD('diagnostics upload disabled: $error');
+  }
 }
 
 class NeembaMiniApp extends StatelessWidget {

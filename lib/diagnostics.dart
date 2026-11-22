@@ -2,8 +2,104 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:mvp/log.dart';
+
+/// One on-disk record split into its sequence number and the rest of the line.
+class DiagnosticEntry {
+  const DiagnosticEntry(this.seq, this.line);
+
+  final int seq;
+
+  /// Starts with the ISO8601 timestamp, never empty.
+  final String line;
+}
+
+/// installId + upload cursor, persisted as `diagnostics.state.json`.
+class DiagnosticsState {
+  const DiagnosticsState({required this.installId, required this.ackedMaxSeq});
+
+  /// Lowercase UUID v4, always 36 chars.
+  final String installId;
+
+  /// -1 means nothing has been acknowledged yet.
+  final int ackedMaxSeq;
+}
+
+final RegExp _seqToken = RegExp(r'^[0-9]+$');
+final RegExp _sessionIdValue = RegExp(r'''sessionId=([^&#'"\s]+)''');
+final RegExp _installIdPattern = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+);
+
+/// Splits `<seq> <rest>`. Null when the first token is not an unsigned decimal
+/// int that fits, or when `<rest>` is empty.
+DiagnosticEntry? parseDiagnosticLine(String raw) {
+  final space = raw.indexOf(' ');
+  if (space <= 0) return null;
+  final token = raw.substring(0, space);
+  if (!_seqToken.hasMatch(token)) return null;
+  final seq = int.tryParse(token);
+  if (seq == null) return null;
+  final rest = raw.substring(space + 1);
+  if (rest.isEmpty) return null;
+  return DiagnosticEntry(seq, rest);
+}
+
+/// Replaces every `sessionId=<value>` with `sessionId=<maskId(value)>`.
+///
+/// The value runs until `&`, `#`, a quote or whitespace. Idempotent, because
+/// [maskId] maps its own output to itself.
+String maskSessionIds(String text) => text.replaceAllMapped(
+      _sessionIdValue,
+      (match) => 'sessionId=${maskId(match.group(1))}',
+    );
+
+/// Pure migration of one file's lines. Lines that parse keep their seq; every
+/// other non-empty line gets firstSeq, firstSeq + 1, ... in input order.
+/// [maskSessionIds] is applied to every output line and empty lines are dropped.
+({List<String> lines, int nextSeq}) migrateLegacyLines(
+  List<String> lines, {
+  required int firstSeq,
+}) {
+  final out = <String>[];
+  var next = firstSeq;
+  for (final line in lines) {
+    if (line.trim().isEmpty) continue;
+    final masked = maskSessionIds(line);
+    if (parseDiagnosticLine(line) != null) {
+      out.add(masked);
+    } else {
+      out.add('$next $masked');
+      next++;
+    }
+  }
+  return (lines: out, nextSeq: next);
+}
+
+/// Lowercase RFC 4122 v4 UUID from 16 random bytes.
+String generateInstallId(Random random) {
+  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+      '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+}
+
+Future<List<String>> _readLines(File file) async {
+  try {
+    if (!await file.exists()) return const [];
+    final text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
+    final lines = text.split('\n');
+    if (lines.isNotEmpty && lines.last.isEmpty) lines.removeLast();
+    return lines;
+  } catch (error) {
+    logD('diagnostics read failed: $error');
+    return const [];
+  }
+}
 
 /// Release-surviving diagnostics.
 ///
@@ -29,8 +125,133 @@ class Diagnostics {
     this.maxFileBytes = 256 * 1024,
     this.flushInterval = const Duration(seconds: 5),
     DateTime Function()? clock,
+    int firstSeq = 0,
+    DiagnosticsState? state,
   })  : _directory = directory,
-        _now = clock ?? DateTime.now;
+        _now = clock ?? DateTime.now,
+        _nextSeq = firstSeq,
+        _state = state;
+
+  /// Startup, before any record: loads or creates the install state, restores
+  /// the seq counter from both files and the cursor, and migrates lines that
+  /// predate seq numbers. Never throws for file-content problems.
+  static Future<Diagnostics> open({
+    required Directory directory,
+    int bufferLines = 200,
+    int maxFileBytes = 256 * 1024,
+    Duration flushInterval = const Duration(seconds: 5),
+    DateTime Function()? clock,
+    Random? random,
+  }) async {
+    try {
+      await directory.create(recursive: true);
+    } catch (error) {
+      logD('diagnostics directory failed: $error');
+    }
+    final state = await _loadOrCreateState(directory, random ?? Random.secure());
+    final previous = File('${directory.path}/$_previousName');
+    final current = File('${directory.path}/$_currentName');
+    final previousLines = await _readLines(previous);
+    final currentLines = await _readLines(current);
+
+    var maxSeq = state.ackedMaxSeq;
+    for (final line in [...previousLines, ...currentLines]) {
+      final entry = parseDiagnosticLine(line);
+      if (entry != null && entry.seq > maxSeq) maxSeq = entry.seq;
+    }
+    var next = maxSeq + 1;
+    next = await _migrateFile(previous, previousLines, next);
+    next = await _migrateFile(current, currentLines, next);
+
+    return Diagnostics(
+      directory: directory,
+      bufferLines: bufferLines,
+      maxFileBytes: maxFileBytes,
+      flushInterval: flushInterval,
+      clock: clock,
+      firstSeq: next,
+      state: state,
+    );
+  }
+
+  static Future<DiagnosticsState> _loadOrCreateState(
+    Directory directory,
+    Random random,
+  ) async {
+    final file = File('${directory.path}/$_stateName');
+    try {
+      if (await file.exists()) {
+        final decoded = jsonDecode(await file.readAsString());
+        if (decoded is Map) {
+          final id = decoded['installId'];
+          final acked = decoded['ackedMaxSeq'];
+          if (id is String && _installIdPattern.hasMatch(id)) {
+            return DiagnosticsState(
+              installId: id,
+              ackedMaxSeq: acked is int && acked >= -1 ? acked : -1,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      logD('diagnostics state unreadable: $error');
+    }
+    final fresh = DiagnosticsState(
+      installId: generateInstallId(random),
+      ackedMaxSeq: -1,
+    );
+    await _writeState(directory, fresh);
+    return fresh;
+  }
+
+  static Future<void> _writeState(
+    Directory directory,
+    DiagnosticsState state,
+  ) async {
+    try {
+      final tmp = File('${directory.path}/$_stateName.tmp');
+      await tmp.writeAsString(
+        jsonEncode({
+          'installId': state.installId,
+          'ackedMaxSeq': state.ackedMaxSeq,
+        }),
+        flush: true,
+      );
+      await tmp.rename('${directory.path}/$_stateName');
+    } catch (error) {
+      logD('diagnostics state write failed: $error');
+    }
+  }
+
+  /// Rewrites [file] with seq-prefixed, masked lines via a temp file. A failure
+  /// leaves the original untouched. Returns the next free seq either way.
+  static Future<int> _migrateFile(
+    File file,
+    List<String> lines,
+    int firstSeq,
+  ) async {
+    final migrated = migrateLegacyLines(lines, firstSeq: firstSeq);
+    var unchanged = migrated.lines.length == lines.length;
+    for (var i = 0; unchanged && i < lines.length; i++) {
+      unchanged = migrated.lines[i] == lines[i];
+    }
+    if (unchanged) return migrated.nextSeq;
+
+    final tmp = File('${file.path}.migrating');
+    try {
+      await tmp.writeAsString(
+        migrated.lines.map((line) => '$line\n').join(),
+        flush: true,
+      );
+      await tmp.rename(file.path);
+    } catch (error) {
+      logD('diagnostics migration failed for ${file.path}: $error');
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+    }
+    return migrated.nextSeq;
+  }
 
   /// Records held in memory awaiting a write. A burst larger than this drops
   /// the oldest — see [_scheduleFlush], which flushes early to keep that rare.
@@ -56,9 +277,23 @@ class Diagnostics {
 
   int _dropped = 0;
   bool _disposed = false;
+  int _nextSeq;
+  DiagnosticsState? _state;
+  Future<void> _stateWrites = Future<void>.value();
+
+  /// The seq the next record will get. Dropped records consume theirs too.
+  int get nextSeq => _nextSeq;
+
+  /// Null when built without [open].
+  DiagnosticsState? get state => _state;
+
+  /// Called synchronously from [record] after the line is buffered. Listener
+  /// exceptions are swallowed.
+  void Function(String event)? onEvent;
 
   static const String _currentName = 'diagnostics.log';
   static const String _previousName = 'diagnostics.1.log';
+  static const String _stateName = 'diagnostics.state.json';
 
   static const int _maxValueChars = 200;
   static const int _maxStackChars = 1200;
@@ -89,12 +324,60 @@ class Diagnostics {
   /// Appends one record. Cheap and synchronous — the file write happens later.
   void record(String event, [Map<String, Object?>? fields]) {
     if (_disposed) return;
-    final line = _format(_now(), event, fields);
+    final line = '${_nextSeq++} ${_format(_now(), event, fields)}';
     _add(line);
     // Dev builds get the same line in logcat for free: logD compiles to nothing
     // in release, so this cannot reintroduce the P1-1 leak.
     logD(line);
     _scheduleFlush();
+    try {
+      onEvent?.call(event);
+    } catch (error) {
+      logD('diagnostics onEvent failed: $error');
+    }
+  }
+
+  /// Drains the buffer and reads both files inside the write chain, so a
+  /// rotation cannot interleave with the read. Returns entries with seq above
+  /// [cursor], ascending. Lines that do not parse are skipped.
+  Future<List<DiagnosticEntry>> entriesAfter(int cursor) {
+    _timer?.cancel();
+    _timer = null;
+    final done = Completer<List<DiagnosticEntry>>();
+    _writes = _writes.then((_) async {
+      try {
+        await _drain();
+        final bySeq = <int, DiagnosticEntry>{};
+        for (final name in const [_previousName, _currentName]) {
+          for (final raw in await _readLines(File('${_directory.path}/$name'))) {
+            final entry = parseDiagnosticLine(raw);
+            if (entry != null && entry.seq > cursor) bySeq[entry.seq] = entry;
+          }
+        }
+        done.complete(
+          bySeq.values.toList()..sort((a, b) => a.seq.compareTo(b.seq)),
+        );
+      } catch (error, stack) {
+        done.completeError(error, stack);
+      }
+    });
+    return done.future;
+  }
+
+  /// Raises the acknowledged cursor (never lowers it) and persists it.
+  /// Failures are swallowed.
+  Future<void> commitCursor(int ackedMaxSeq) {
+    final current = _state;
+    if (current == null || ackedMaxSeq <= current.ackedMaxSeq) {
+      return Future<void>.value();
+    }
+    final next = DiagnosticsState(
+      installId: current.installId,
+      ackedMaxSeq: ackedMaxSeq,
+    );
+    _state = next;
+    _stateWrites = _stateWrites.then((_) => _writeState(_directory, next));
+    return _stateWrites;
   }
 
   /// Records a caught or uncaught error, then writes immediately.
@@ -192,7 +475,8 @@ class Diagnostics {
       if (_dropped > 0) {
         // Report the gap in the file itself; a silent hole reads as "nothing
         // happened" when the truth is "too much happened".
-        chunk = '${_format(_now(), 'diag.dropped', {'lines': _dropped})}\n$chunk';
+        final marker = _format(_now(), 'diag.dropped', {'lines': _dropped});
+        chunk = '${_nextSeq++} $marker\n$chunk';
         _dropped = 0;
       }
       // Encoded up front so the size test and the write agree on what a byte
@@ -244,7 +528,10 @@ class Diagnostics {
     if (value == null) return '<null>';
     // One record per line is what makes the file greppable, so every run of
     // whitespace — newlines included — collapses to a single space.
-    var text = value.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    // Masked before the cut, or a cut inside the id would leave its short
+    // prefix unmasked.
+    var text =
+        maskSessionIds(value.toString()).replaceAll(RegExp(r'\s+'), ' ').trim();
     if (text.isEmpty) return '<empty>';
     if (text.length > max) {
       text = '${text.substring(0, max)}…';
