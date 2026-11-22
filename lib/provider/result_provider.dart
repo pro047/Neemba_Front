@@ -6,5 +6,3 @@ final startSessionResultProvider =
     StateProvider<AsyncValue<StartSessionResponse?>>(
       (_) => const AsyncValue.data(null),
     );
-
-final startSessionSuccessProvider = StateProvider<bool?>((_) => null);

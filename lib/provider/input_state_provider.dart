@@ -1,5 +1,5 @@
 import 'package:flutter_riverpod/legacy.dart';
 
-enum inputState { rtmp, mic }
+enum InputState { rtmp, mic }
 
-final inputStateProvider = StateProvider<inputState?>((_) => null);
+final inputStateProvider = StateProvider<InputState?>((_) => null);

@@ -1,4 +1,5 @@
 *.env
+.env.*
 
 # Miscellaneous
 *.class
@@ -46,9 +47,25 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Release signing material. This remote is public and a leaked upload key can
+# only be revoked, never rotated back — these must never be committed.
+key.properties
+*.jks
+*.keystore
+*.p12
+
+# Xcode build cache (in-project DerivedData location)
+**/DerivedData/
+
 ios/Pods/
 ios/.symlinks/
 ios/Flutter/Flutter.framework
 ios/Flutter/Flutter.podspec
 android/.gradle/
 android/captures/
+.pipeline/
+# Session handoff notes — records unresolved server-side vulnerabilities and
+# device identifiers. This remote is public, so it stays local.
+HANDOFF.json
+HANDOFF-ARCHIVE.json
+!.env.example

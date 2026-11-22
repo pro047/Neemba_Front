@@ -3,6 +3,6 @@ import 'package:mvp/mic_client.dart';
 import 'package:mvp/provider/api_config_provider.dart';
 
 final micClientProvider = Provider<MicClient>((ref) {
-  final ApiConfig = ref.watch(apiConfigProvider);
-  return MicClient(ApiConfig);
+  final apiConfig = ref.watch(apiConfigProvider);
+  return MicClient(apiConfig);
 });
