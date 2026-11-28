@@ -80,12 +80,27 @@ Duration wsRetryBackoff(
 /// retries already made, so the total attempt count is exactly [maxRetries].
 bool wsShouldRetry(int currentRetry, int maxRetries) => currentRetry < maxRetries;
 
+/// Adds the device's install id as `clientId` so the server can tell a
+/// reconnect from the same device apart from a new listener, and join its
+/// ws_blips rows to the diagnostics uploads that carry the same id. Without it
+/// the server mints a fresh uuid4 per connection. Other query parameters
+/// (sessionId) are kept as the backend sent them.
+Uri wsWithClientId(Uri uri, String? clientId) {
+  if (clientId == null || clientId.isEmpty) return uri;
+  return uri.replace(
+    queryParameters: {...uri.queryParameters, 'clientId': clientId},
+  );
+}
+
+String? _installedClientId() => diagnostics?.state?.installId;
+
 class WsClient {
   final Map<String, dynamic> _headers;
   final String? _baseHttpUrl;
   IOWebSocketChannel? _channel;
   StreamSubscription? _subscription;
   final Duration _pingInterval;
+  final String? Function() _clientId;
   bool _shouldReconnect = false;
   int _currentRetry = 0;
 
@@ -100,12 +115,16 @@ class WsClient {
     Map<String, dynamic>? headers,
     String? baseHttpUrl,
     Duration pingInterval = kWsPingInterval,
+    String? Function()? clientId,
   })  : _headers = headers ?? const {},
         _baseHttpUrl = baseHttpUrl,
-        _pingInterval = pingInterval;
+        _pingInterval = pingInterval,
+        _clientId = clientId ?? _installedClientId;
 
-  Uri _buildUri(String webSocketUrl) {
-    final rawUri = Uri.parse(webSocketUrl);
+  Uri _buildUri(String webSocketUrl) =>
+      wsWithClientId(_withBaseHost(Uri.parse(webSocketUrl)), _clientId());
+
+  Uri _withBaseHost(Uri rawUri) {
     if (_baseHttpUrl == null) return rawUri;
 
     final base = Uri.parse(_baseHttpUrl);

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mvp/diagnostics.dart';
 import 'package:mvp/ws_client.dart';
 
 void main() {
@@ -227,6 +228,96 @@ void main() {
       expect(stopwatch.elapsed, lessThan(interval * 2 + kWsCloseTimeout * 2));
     });
   });
+
+  group('clientId', () {
+    test('sessionId를 그대로 두고 clientId를 덧붙인다', () {
+      final uri = wsWithClientId(
+        Uri.parse('wss://neemba.app/ws?sessionId=abc'),
+        'install-1',
+      );
+      expect(uri.queryParameters, {'sessionId': 'abc', 'clientId': 'install-1'});
+      expect(uri.path, '/ws');
+    });
+
+    test('installId가 없으면 URL을 바꾸지 않는다 — 서버가 지금처럼 uuid4를 발급', () {
+      final raw = Uri.parse('wss://neemba.app/ws?sessionId=abc');
+      expect(wsWithClientId(raw, null), raw);
+      expect(wsWithClientId(raw, ''), raw);
+    });
+
+    test('기본값은 설치된 진단의 installId다', () async {
+      final requests = <Uri>[];
+      final server = await _startRecordingServer(requests);
+      final dir = await Directory.systemTemp.createTemp('ws_client_id');
+      installDiagnostics(Diagnostics(
+        directory: dir,
+        state: const DiagnosticsState(installId: 'install-1', ackedMaxSeq: -1),
+      ));
+      final client = WsClient();
+      addTearDown(() async {
+        resetDiagnostics();
+        await client.close();
+        await server.close(force: true);
+        await dir.delete(recursive: true);
+      });
+
+      await client.connectWithRetry(
+        sessionId: 's1',
+        webSocketUrl: 'ws://127.0.0.1:${server.port}/ws?sessionId=s1',
+        onText: (_) {},
+        maxRetries: kWsMaxRetriesRtmp,
+      );
+      await _waitFor(() => requests.isNotEmpty);
+
+      expect(requests.single.queryParameters['clientId'], 'install-1');
+    });
+
+    test('재연결도 같은 sessionId·clientId로 붙는다', () async {
+      final requests = <Uri>[];
+      final sockets = <WebSocket>[];
+      final server = await _startRecordingServer(requests, sockets);
+      final client = WsClient(clientId: () => 'install-1');
+      addTearDown(() async {
+        await client.close();
+        await server.close(force: true);
+      });
+      final reconnected = Completer<void>();
+
+      await client.connectWithRetry(
+        sessionId: 's1',
+        webSocketUrl: 'ws://127.0.0.1:${server.port}/ws?sessionId=s1',
+        onText: (_) {},
+        maxRetries: kWsMaxRetriesRtmp,
+        initialBackoff: const Duration(milliseconds: 10),
+        onReconnected: () {
+          if (!reconnected.isCompleted) reconnected.complete();
+        },
+      );
+      await _waitFor(() => sockets.length == 1);
+      await sockets.single.close(1011);
+      await reconnected.future.timeout(const Duration(seconds: 5));
+
+      expect(requests, hasLength(2));
+      for (final uri in requests) {
+        expect(uri.queryParameters, {'sessionId': 's1', 'clientId': 'install-1'});
+      }
+    });
+  });
+}
+
+/// Like [_startEchoServer], but also records each upgrade request's URI.
+Future<HttpServer> _startRecordingServer(
+  List<Uri> requests, [
+  List<WebSocket>? sockets,
+]) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) async {
+    requests.add(request.uri);
+    final socket = await WebSocketTransformer.upgrade(request);
+    sockets?.add(socket);
+    socket.listen((_) {});
+  });
+  return server;
 }
 
 /// A loopback WebSocket server that records every accepted socket.
