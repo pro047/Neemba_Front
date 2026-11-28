@@ -46,6 +46,10 @@ class ModeSelectScreen extends ConsumerWidget {
             ),
           ),
           body: TabBarView(
+            // Leaving a tab disposes it, and dispose ends its session. A
+            // sideways drift while reading subtitles must not do that, so
+            // only a tap on the tab bar switches tabs.
+            physics: const NeverScrollableScrollPhysics(),
             children: [
               RtmpTranslationTab(service: service),
               MicTranslationTab(
